@@ -1,0 +1,32 @@
+services:
+  investment-research:
+    build: .
+    container_name: investment_agents
+    env_file:
+      - .env
+    environment:
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+    volumes:
+      # Mount whole directory for hot-reload and access to all scripts
+      - .:/app
+      # GraphRAG .env mount (needed for Docker CLI to find environment vars)
+      - E:/ai-workspace/projects/graphRAG-LlamaIndex/.env:/app/graphrag.env
+      # Docker socket mount for sibling containers
+      - /var/run/docker.sock:/var/run/docker.sock
+
+    stdin_open: true
+    tty: true
+
+  monitoring-api:
+    build: .
+    container_name: monitoring_api
+    command: python -m uvicorn api_server:app --host 0.0.0.0 --port 8000
+    ports:
+      - "8001:8000"
+    env_file:
+      - .env
+    volumes:
+      - .:/app
+      - E:/ai-workspace/projects/graphRAG-LlamaIndex/.env:/app/graphrag.env
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: always

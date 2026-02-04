@@ -1,0 +1,26 @@
+# ABOUTME: Git ignore rules for the multi-agent system.
+# ABOUTME: Prevents accidental leaks of secrets and local artifacts.
+
+# Seconds/Keys
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+.env
+
+# Research Artifacts
+output/
+*.log
+
+# IDEs
+.vscode/
+.idea/
+
+# GraphRAG Local State (Should remain local)
+.DuckDB/
+node_modules/
+.graphrag/

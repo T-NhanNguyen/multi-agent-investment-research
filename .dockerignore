@@ -1,0 +1,16 @@
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.env
+*.json
+*.md
+!agent-definition-files/**/*.md
+.git
+.gitignore
+output/
+.agent/
+.gemini/
