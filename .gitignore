@@ -24,3 +24,7 @@ output/
 .DuckDB/
 node_modules/
 .graphrag/
+
+# Personal
+.agent/
+examples/
