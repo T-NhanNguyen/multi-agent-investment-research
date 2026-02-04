@@ -6,6 +6,8 @@ services:
       - .env
     environment:
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       # Mount whole directory for hot-reload and access to all scripts
       - .:/app
@@ -23,6 +25,8 @@ services:
     command: python -m uvicorn api_server:app --host 0.0.0.0 --port 8000
     ports:
       - "8001:8000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     env_file:
       - .env
     volumes:

@@ -18,6 +18,7 @@ import anyio
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 import internal_configs as cfg
+from llm_client import OpenRouterClient, ILlmClient
 
 # Environment variables are loaded automatically by internal_configs
 
@@ -43,64 +44,64 @@ class AgentProfile:
     skills: List[str]
     personality: List[str]
     specialization: str
-    full_spec: str  # Complete markdown content as system prompt
+    fullSpec: str  # Complete markdown content as system prompt
 
 
 @dataclass
 class ResearchResult:
     """Container for agent research results"""
-    agent_name: str
+    agentName: str
     analysis: str
     timestamp: datetime
     error: Optional[str] = None
 
 
-class MCPBridge:
-    """Bridges OpenRouter API with Local Docker MCP Servers"""
+class McpToolProvider:
+    """Bridges OpenRouter API with Local Docker MCP Servers to provide specialized toolsets."""
     
-    def __init__(self, name: str, server_params: StdioServerParameters):
+    def __init__(self, name: str, serverParams: StdioServerParameters):
         self.name = name
-        self.server_params = server_params
+        self.serverParams = serverParams
         self.session: Optional[ClientSession] = None
-        self.exit_stack = AsyncExitStack()
-        self.tools_map = {}  # Cache tool definitions
+        self.exitStack = AsyncExitStack()
+        self.toolsLibrary = {}  # Cache tool definitions
 
     async def connect(self):
-        """Establishes stdio connection to the Docker container"""
+        """Establishes deterministic stdio connection to the Dockerized MCP host."""
         if self.session:
             return
 
-        logger.info(f"Connecting to MCP Server [{self.name}]: {self.server_params.command} {' '.join(self.server_params.args)}...")
+        logger.info(f"Connecting to McpToolProvider [{self.name}]: {self.serverParams.command} {' '.join(self.serverParams.args)}...")
         
         try:
             # Start the stdio transport
-            transport = await self.exit_stack.enter_async_context(
-                stdio_client(self.server_params)
+            transport = await self.exitStack.enter_async_context(
+                stdio_client(self.serverParams)
             )
             self.read, self.write = transport
             
             # Start the MCP session
-            self.session = await self.exit_stack.enter_async_context(
+            self.session = await self.exitStack.enter_async_context(
                 ClientSession(self.read, self.write)
             )
             await self.session.initialize()
             
             # Fetch available tools and cache them
             result = await self.session.list_tools()
-            self.tools_map = {tool.name: tool for tool in result.tools}
-            logger.info(f"Connected to [{self.name}]. Loaded {len(self.tools_map)} tools.")
+            self.toolsLibrary = {tool.name: tool for tool in result.tools}
+            logger.info(f"Connected to [{self.name}]. Loaded {len(self.toolsLibrary)} tools.")
         except Exception as exc:
-            logger.error(f"Failed to connect to MCP Server [{self.name}]: {exc}")
+            logger.error(f"Failed to connect to McpToolProvider [{self.name}]: {exc}")
             raise
 
-    async def get_openai_tools(self) -> List[Dict]:
-        """Convert MCP tool definitions to OpenRouter/OpenAI format"""
+    async def getOpenAiToolSchema(self) -> List[Dict]:
+        """Convert MCP tool definitions to OpenRouter/OpenAI tool call schema."""
         if not self.session:
             await self.connect()
             
-        openai_tools = []
-        for tool in self.tools_map.values():
-            openai_tools.append({
+        toolSchemas = []
+        for tool in self.toolsLibrary.values():
+            toolSchemas.append({
                 "type": "function",
                 "function": {
                     "name": tool.name,
@@ -108,12 +109,12 @@ class MCPBridge:
                     "parameters": tool.inputSchema  # MCP inputSchema maps 1:1 to OpenAI parameters
                 }
             })
-        return openai_tools
+        return toolSchemas
 
-    async def call_tool(self, name: str, arguments: Dict) -> str:
-        """Execute the tool on the Docker container"""
+    async def executeMcpTool(self, name: str, arguments: Dict) -> str:
+        """Execute the requested tool on the Docker container and return structured text results."""
         if not self.session:
-            raise RuntimeError(f"MCP Session [{self.name}] not connected")
+            raise RuntimeError(f"McpToolProvider Session [{self.name}] not connected")
             
         logger.info(f"Executing MCP Tool [{self.name}]: {name}({json.dumps(arguments)})")
         try:
@@ -127,12 +128,12 @@ class MCPBridge:
             return f"Error: {str(exc)}"
 
     async def cleanup(self):
-        """Close connection and cleanup resources"""
-        logger.info(f"Cleaning up MCP Server [{self.name}]")
+        """Standard teardown for all active session resources."""
+        logger.info(f"Cleaning up McpToolProvider [{self.name}]")
         try:
             # Shield the cleanup to prevent it from being cancelled while running
             with anyio.CancelScope(shield=True):
-                await self.exit_stack.aclose()
+                await self.exitStack.aclose()
         except Exception as exc:
             # We catch everything during cleanup to ensure we don't crash during shutdown
             logger.debug(f"Interruption or error during cleanup of [{self.name}]: {exc}")
@@ -141,25 +142,25 @@ class MCPBridge:
 class WebSearchAgent:
     """Specialized agent using OpenRouter Responses API for web search with task-safe caching"""
     
-    def __init__(self, api_key: str, model: str = cfg.config.WEB_SEARCH_MODEL):
-        self.api_key = api_key
+    def __init__(self, apiKey: str, model: str = cfg.config.WEB_SEARCH_MODEL):
+        self.apiKey = apiKey
         self.model = model
-        self.base_url = OPENROUTER_RESPONSES_ENDPOINT
-        self.search_cache = {}  # Semantic cache to avoid redundant web hits
-        self.cache_lock = asyncio.Lock()
+        self.baseUrl = OPENROUTER_RESPONSES_ENDPOINT
+        self.searchCache = {}  # Semantic cache to avoid redundant web hits
+        self.cacheLock = asyncio.Lock()
         
-    async def search(self, query: str, max_results: int = 3) -> str:
+    async def search(self, query: str, maxResults: int = 3) -> str:
         """
         Execute web search via OpenRouter Responses API.
         Implements single-flight pattern via lock to prevent redundant concurrent searches.
         """
         # Normalize query for caching
-        cache_key = query.strip().lower()
+        cacheKey = query.strip().lower()
         
-        async with self.cache_lock:
-            if cache_key in self.search_cache:
+        async with self.cacheLock:
+            if cacheKey in self.searchCache:
                 logger.info(f"WebSearchAgent: Serving cached result for query: '{query}'")
-                return self.search_cache[cache_key]
+                return self.searchCache[cacheKey]
                 
             logger.info(f"WebSearchAgent: Performing live web search for: '{query}'")
             
@@ -177,15 +178,15 @@ class WebSearchAgent:
                         ]
                     }
                 ],
-                "plugins": [{"id": "web", "max_results": max_results}]
+                "plugins": [{"id": "web", "max_results": maxResults}]
             }
             
             try:
                 async with httpx.AsyncClient(timeout=None) as client:
                     response = await client.post(
-                        self.base_url,
+                        self.baseUrl,
                         headers={
-                            "Authorization": f"Bearer {self.api_key}",
+                            "Authorization": f"Bearer {self.apiKey}",
                             "Content-Type": "application/json",
                         },
                         json=payload
@@ -194,45 +195,42 @@ class WebSearchAgent:
                     result = response.json()
                     
                     # Extract content from Responses API output
-                    # The Responses API returns multiple items in output array:
-                    # - First item is typically "reasoning" with encrypted content
-                    # - Subsequent items are "message" types with actual content
-                    output_content = ""
+                    outputContent = ""
                     if "output" in result and result["output"]:
-                        for output_item in result["output"]:
+                        for outputItem in result["output"]:
                             # Skip reasoning/encrypted items, look for message types
-                            if output_item.get("type") == "message":
-                                content_list = output_item.get("content", [])
-                                for part in content_list:
-                                    part_type = part.get("type")
-                                    if part_type in ["text", "output_text"]:
-                                        output_content += part.get("text", "")
+                            if outputItem.get("type") == "message":
+                                contentList = outputItem.get("content", [])
+                                for part in contentList:
+                                    partType = part.get("type")
+                                    if partType in ["text", "output_text"]:
+                                        outputContent += part.get("text", "")
                             
-                    final_result = output_content.strip() or "No information found on the web for this query."
-                    self.search_cache[cache_key] = final_result
-                    return final_result
+                    finalResult = outputContent.strip() or "No information found on the web for this query."
+                    self.searchCache[cacheKey] = finalResult
+                    return finalResult
                     
             except Exception as exc:
                 logger.error(f"WebSearchAgent: API failure: {exc}")
                 return f"Error performing web search: {str(exc)}"
 
 
-class AgentBridge:
+class InternalAgentAdapter:
     """
-    Wrapper to expose an internal agent as a callable tool for other agents.
-    Mimics MCPBridge interface for seamless integration.
+    Adapter to expose an internal specialized agent as a callable tool for other agents.
+    Mimics McpToolProvider interface for seamless integration within research loops.
     """
     
-    def __init__(self, name: str, web_agent: WebSearchAgent):
+    def __init__(self, name: str, webAgent: WebSearchAgent):
         self.name = name
-        self.web_agent = web_agent
-        self.tools_map = cfg.WEB_SEARCH_TOOL_DEFINITION
+        self.webAgent = webAgent
+        self.toolsLibrary = cfg.WEB_SEARCH_TOOL_DEFINITION
 
-    async def get_openai_tools(self) -> List[Dict]:
-        """Convert internal tool definitions to OpenAI tool format"""
-        tools = []
-        for tool in self.tools_map.values():
-            tools.append({
+    async def getOpenAiToolSchema(self) -> List[Dict]:
+        """Convert internal tool definitions to OpenAI tool call schema."""
+        toolSchemas = []
+        for tool in self.toolsLibrary.values():
+            toolSchemas.append({
                 "type": "function",
                 "function": {
                     "name": tool["name"],
@@ -240,164 +238,131 @@ class AgentBridge:
                     "parameters": tool["inputSchema"]
                 }
             })
-        return tools
+        return toolSchemas
 
-    async def call_tool(self, name: str, arguments: Dict) -> str:
-        """Route tool call to the internal WebSearchAgent"""
+    async def executeMcpTool(self, name: str, arguments: Dict) -> str:
+        """Route tool call to the internal WebSearchAgent."""
         if name == "web_search":
             query = arguments.get("query")
-            max_results = arguments.get("max_results", 3)
+            maxResults = arguments.get("max_results", 3)
             if not query:
                 return "Error: Missing search query."
-            return await self.web_agent.search(query, max_results)
-        return f"Error: Tool {name} not supported by this bridge."
+            return await self.webAgent.search(query, maxResults)
+        return f"Error: Tool {name} not supported by this adapter."
 
 
 class Agent:
-    """Investment research agent with hybrid profile and MCP tool calling capability"""
+    """Investment research agent with hybrid profile and MCP tool calling capability."""
     
     def __init__(
         self, 
         profile: AgentProfile, 
-        api_key: str, 
+        llmClient: ILlmClient,
         model: str = cfg.config.PRIMARY_MODEL,
-        mcp_bridge: Optional[MCPBridge] = None,
-        agent_bridge: Optional[AgentBridge] = None
+        mcpProvider: Optional[McpToolProvider] = None,
+        agentAdapter: Optional[InternalAgentAdapter] = None
     ):
         self.profile = profile
-        self.api_key = api_key
+        self.llmClient = llmClient
         self.model = model
-        self.mcp_bridge = mcp_bridge
-        self.agent_bridge = agent_bridge
-        self.base_url = OPENROUTER_CHAT_ENDPOINT
+        self.mcpProvider = mcpProvider
+        self.agentAdapter = agentAdapter
     
-    def _build_system_prompt(self) -> str:
-        """Build system prompt using full markdown specification (hybrid approach)"""
-        return self.profile.full_spec
+    def _buildSystemPrompt(self) -> str:
+        """Constructs the system prompt from the agent's full markdown specification."""
+        return self.profile.fullSpec
     
-    async def analyze(self, query: str) -> str:
+    async def performResearchTask(self, query: str) -> str:
         """
-        Execute analysis task with tool-calling loop, retry logic and error handling.
-        Adheres to agentic focus with deterministic tool execution and circuit breakers.
+        Execute analysis task with tool-calling loop.
+        Adheres to agentic focus with deterministic tool execution.
         """
-        messages = [
-            {"role": "system", "content": self.profile.full_spec},
+        interactionHistory = [
+            {"role": "system", "content": self.profile.fullSpec},
             {"role": "user", "content": query}
         ]
         
-        # Tools can come from multiple sources (MCP servers or other Agents)
-        available_tools = []
-        if self.mcp_bridge:
-            mcp_tools = await self.mcp_bridge.get_openai_tools()
-            available_tools.extend(mcp_tools)
-        if self.agent_bridge:
-            agent_tools = await self.agent_bridge.get_openai_tools()
-            available_tools.extend(agent_tools)
+        availableTools = []
+        if self.mcpProvider:
+            mcpTools = await self.mcpProvider.getOpenAiToolSchema()
+            availableTools.extend(mcpTools)
+            
+        if self.agentAdapter:
+            agentTools = await self.agentAdapter.getOpenAiToolSchema()
+            availableTools.extend(agentTools)
         
-        tool_iteration_count = 0
+        toolIterationCount = 0
+        MAX_TOOL_CYCLES = 10 
         
-        for attempt_index in range(cfg.config.MAX_RETRIES):
-            try: 
-                while True:  # Core Agentic Loop
-                    payload = {
-                        "model": self.model,
-                        "messages": messages
-                    }
-                    if available_tools:
-                        payload["tools"] = available_tools
-                        payload["tool_choice"] = "auto"
-
-                    async with httpx.AsyncClient(timeout=None) as client:
-                        logger.info(f"{self.profile.name}: Requesting LLM (Attempt {attempt_index + 1})")
-                        logger.debug(f"{self.profile.name}: [DEBUG] Using URL: {self.base_url}")
-                        
-                        response = await client.post(
-                            self.base_url,
-                            headers={
-                                "Authorization": f"Bearer {self.api_key}",
-                                "Content-Type": "application/json"
-                            },
-                            json=payload
-                        )
-                        response.raise_for_status()
-                        llm_result = response.json()
-                        
-                        assistant_message = llm_result["choices"][0]["message"]
-                        
-                        # CASE A: Final Text Response received
-                        if not assistant_message.get("tool_calls"):
-                            final_analysis_text = assistant_message["content"]
-                            logger.info(f"{self.profile.name}: Analysis complete ({len(final_analysis_text or '')} chars)")
-                            return final_analysis_text or "No content returned."
-
-                        # CASE B: Tool Calls Requested by LLM
-                        tool_iteration_count += 1
-                        messages.append(assistant_message) # Maintain conversation state
-                        
-                        for requested_tool in assistant_message["tool_calls"]:
-                            target_tool_name = requested_tool["function"]["name"]
-                            tool_arguments = json.loads(requested_tool["function"]["arguments"])
-                            
-                            logger.info(f"{self.profile.name}: LLM suggested tool -> {target_tool_name}")
-                            
-                            # Route the tool call to the correct bridge
-                            if self.mcp_bridge and target_tool_name in self.mcp_bridge.tools_map:
-                                execution_result = await self.mcp_bridge.call_tool(target_tool_name, tool_arguments)
-                            elif self.agent_bridge and target_tool_name in self.agent_bridge.tools_map:
-                                execution_result = await self.agent_bridge.call_tool(target_tool_name, tool_arguments)
-                            else:
-                                execution_result = f"Error: Tool {target_tool_name} not found in this agent's bridge context."
-                            
-                            messages.append({
-                                "role": "tool",
-                                "tool_call_id": requested_tool["id"],
-                                "name": target_tool_name,
-                                "content": execution_result
-                            })
-                        
-                        # Re-enter loop to feed tool outputs back to LLM
-                        
-            except httpx.HTTPStatusError as http_error:
-                if http_error.response.status_code == 429:
-                    # Respect API's Retry-After or apply exponential backoff
-                    retry_after_header = http_error.response.headers.get("Retry-After")
-                    
-                    try:
-                        backoff_seconds = int(retry_after_header) if retry_after_header else min(2 ** attempt_index, cfg.config.RATE_LIMIT_BACKOFF_CAP)
-                    except ValueError:
-                        backoff_seconds = 60 # Default to 60s if header is a date string
-                    
-                    logger.warning(f"{self.profile.name}: Rate limited (429). Backing off for {backoff_seconds}s. (Attempt {attempt_index + 1})")
-                    await anyio.sleep(backoff_seconds)
-                else:
-                    logger.error(f"{self.profile.name}: API Error {http_error.response.status_code} (Attempt {attempt_index + 1})")
-                    if attempt_index == MAX_RETRIES - 1: raise
-                    await anyio.sleep(2 ** attempt_index)
+        for _ in range(MAX_TOOL_CYCLES):
+            try:
+                # Delegate net call to injected client
+                # Client handles retries and rate limits
+                llmResult = await self.llmClient.chatCompletion(
+                    self.model, 
+                    interactionHistory, 
+                    tools=availableTools if availableTools else None
+                )
                 
-            except Exception as unexpected_error:
-                logger.error(f"{self.profile.name}: Unexpected failure (Attempt {attempt_index + 1}): {unexpected_error}")
-                if attempt_index == MAX_RETRIES - 1: raise
-                await anyio.sleep(2 ** attempt_index)
-        
-        raise RuntimeError(f"{self.profile.name}: Could not reach analysis goals within {cfg.config.MAX_RETRIES} attempts.")
+                assistantMessage = llmResult["choices"][0]["message"]
+                
+                # CASE A: Final Text Response received
+                if not assistantMessage.get("tool_calls"):
+                    researchReportContent = assistantMessage["content"]
+                    logger.info(f"{self.profile.name}: Analysis complete ({len(researchReportContent or '')} chars)")
+                    return researchReportContent or "No content returned."
 
-    async def answer_question(self, question: str, original_analysis: str) -> str:
+                # CASE B: Tool Calls Requested by LLM
+                toolIterationCount += 1
+                interactionHistory.append(assistantMessage) 
+                
+                for requestedTool in assistantMessage["tool_calls"]:
+                    targetToolName = requestedTool["function"]["name"]
+                    toolArguments = json.loads(requestedTool["function"]["arguments"])
+                    
+                    logger.info(f"{self.profile.name}: LLM suggested tool -> {targetToolName}")
+                    
+                    # Route the tool call to the correct bridge
+                    if self.mcpProvider and targetToolName in self.mcpProvider.toolsLibrary:
+                        executionResult = await self.mcpProvider.executeMcpTool(targetToolName, toolArguments)
+                    elif self.agentAdapter and targetToolName in self.agentAdapter.toolsLibrary:
+                        executionResult = await self.agentAdapter.executeMcpTool(targetToolName, toolArguments)
+                    else:
+                        executionResult = f"Error: Tool {targetToolName} not found in this agent's bridge context."
+                    
+                    interactionHistory.append({
+                        "role": "tool",
+                        "tool_call_id": requestedTool["id"],
+                        "name": targetToolName,
+                        "content": executionResult
+                    })
+                
+            except Exception as e:
+                logger.error(f"{self.profile.name}: Critical Agent Error: {e}")
+                raise e
+        
+        raise RuntimeError(f"{self.profile.name}: Exceeded maximum tool iteration cycles.")
+
+    async def provideRecursiveAnalysis(self, question: str, originalAnalysis: str) -> str:
         """
-        Answer follow-up clarification questions from synthesis agent
+        Answer follow-up clarification questions from synthesis agent during recursive refinement.
         """
-        prompt = cfg.FOLLOW_UP_PROMPT_TEMPLATE.format(
-            original_analysis=original_analysis,
+        clarificationPrompt = cfg.FOLLOW_UP_PROMPT_TEMPLATE.format(
+            originalAnalysis=originalAnalysis,
             question=question,
             specialization=self.profile.specialization
         )
-        return await self.analyze(prompt)
+        return await self.performResearchTask(clarificationPrompt)
 
 
-class AgentDefinitionParser:
-    """Parse agent definition files with hybrid approach"""
+class AgentSpecLoader:
+    """Loads agent persona specifications from markdown definition files."""
     
     @staticmethod
-    def parse_markdown(content: str) -> AgentProfile:
+    def loadFromMarkdown(content: str) -> AgentProfile:
+        """
+        Parse the hybrid markdown structure to extract metadata and system prompt.
+        """
         lines = content.split('\n')
         name, skills, personality, specialization = "", [], [], ""
         current_section = None
@@ -429,67 +394,72 @@ class AgentDefinitionParser:
         return AgentProfile(name, skills, personality, specialization, content)
 
 
-class MultiAgentOrchestrator:
-    """Orchestrate multi-agent investment research workflow with MCP bridges"""
+class ResearchOrchestrator:
+    """Orchestrates the multi-agent investment research lifecycle across distributed tool providers."""
     
-    # --- Workflow Constants ---
+    # --- Workflow Configuration ---
     PHASE_THROTTLE_SECONDS = cfg.config.PHASE_THROTTLE_SECONDS
     
     def __init__(
         self, 
-        agents_dir: str = None,
-        model_name: str = None,
+        agentsDir: str = None,
+        modelName: str = None,
         mode: str = "all",
-        output_directory: str = cfg.config.OUTPUT_DIR
+        outputDirectory: str = cfg.config.OUTPUT_DIR
     ):
         self.mode = mode.lower()
         if self.mode not in ["fundamental", "momentum", "all"]:
             raise ValueError("Invalid mode. Must be 'fundamental', 'momentum', or 'all'")
 
         # Strict environment validation
-        cfg.config.validate()
-        self.api_key = cfg.config.OPENROUTER_API_KEY
+        cfg.config.verifyConfiguration()
+        self.apiKey = cfg.config.OPENROUTER_API_KEY
         
-        # Determine absolute path for agent definitions
-        if agents_dir is None:
-            agents_dir = str(Path(__file__).parent / "agent-definition-files")
-        self.agents_dir = Path(agents_dir)
+        # Initialize Shared LLM Client
+        self.llmClient = OpenRouterClient(
+            apiKey=self.apiKey, 
+            baseUrl=OPENROUTER_CHAT_ENDPOINT,
+            backoffCap=cfg.config.RATE_LIMIT_BACKOFF_CAP
+        )
+        
+        # Determine absolute path for agent persona specifications
+        if agentsDir is None:
+            agentsDir = str(Path(__file__).parent / "agent-definition-files")
+        self.agentsDir = Path(agentsDir)
         
         # Model configuration
-        self.model = model_name or cfg.config.PRIMARY_MODEL
+        self.model = modelName or cfg.config.PRIMARY_MODEL
             
-        self.output_dir = Path(output_directory)
-        self.output_dir.mkdir(exist_ok=True)
+        self.outputDir = Path(outputDirectory)
+        self.outputDir.mkdir(exist_ok=True)
         
         # GraphRAG path validation (required for Docker sibling volume mounts)
-        registry_path = cfg.config.GRAPHRAG_REGISTRY_DIR
-        project_home_path = cfg.config.GRAPHRAG_PROJECT_PATH
+        registryPath = cfg.config.GRAPHRAG_REGISTRY_DIR
+        projectHomePath = cfg.config.GRAPHRAG_PROJECT_PATH
         
-        if not registry_path or not project_home_path:
+        if not registryPath or not projectHomePath:
             raise ValueError("GRAPHRAG_REGISTRY_DIR or GRAPHRAG_PROJECT_PATH not set in .env")
             
-        # Initialize MCP Bridges (Docker-out-of-Docker / DooD architecture)
-        self.bridges: Dict[str, MCPBridge] = {
-            "finance": MCPBridge("finance-tools", StdioServerParameters(
+        # Initialize Tool Providers
+        self.toolProviders: Dict[str, McpToolProvider] = {
+            "finance": McpToolProvider("finance-tools", StdioServerParameters(
                 command="docker",
                 args=["run", "-i", "--rm", cfg.config.FINANCE_TOOLS_IMAGE],
                 env=None
             )),
-            "graphrag": MCPBridge("graphrag", StdioServerParameters(
+            "graphrag": McpToolProvider("graphrag", StdioServerParameters(
                 command="docker",
                 args=[
                     "run", "-i", "--rm",
-                    "-v", f"{project_home_path}:/app",
+                    "-v", f"{projectHomePath}:/app",
                     "-v", f"{cfg.config.GRAPHRAG_NODE_MODULES_VOLUME}:/app/node_modules",
-                    "-v", f"{registry_path}:/root/.graphrag",
-                    "-v", f"{project_home_path}/.DuckDB:/app/.DuckDB",
-                    "-v", f"{project_home_path}/output:/app/output",
+                    "-v", f"{registryPath}:/root/.graphrag",
+                    "-v", f"{projectHomePath}/.DuckDB:/app/.DuckDB",
+                    "-v", f"{projectHomePath}/output:/app/output",
                     "--add-host=host.docker.internal:host-gateway",
-                    
-                    "-e", f"OPENROUTER_API_KEY={self.api_key}",
+                    "-e", f"OPENROUTER_API_KEY={self.apiKey}",
                     "-e", f"GRAPHRAG_DATABASE={cfg.config.GRAPHRAG_DATABASE}",
                     "-e", "NODE_NO_WARNINGS=1",
-                    
                     cfg.config.GRAPHRAG_IMAGE,
                     "npx", "tsx", "mcp_server.ts"
                 ],
@@ -497,245 +467,314 @@ class MultiAgentOrchestrator:
             ))
         }
         
-        # Initialize specialized Web Search Agent (delegated librarian)
-        web_search_model = cfg.config.WEB_SEARCH_MODEL
-        self.web_search_agent = WebSearchAgent(self.api_key, model=web_search_model)
+        # Initialize specialized Web Search Agent
+        webSearchModel = cfg.config.WEB_SEARCH_MODEL
+        self.webSearchAgent = WebSearchAgent(self.apiKey, model=webSearchModel)
+        self.webSearchAdapter = InternalAgentAdapter("web-search", self.webSearchAgent)
         
-        # Wrap the web search agent in a bridge to make it callable as a tool
-        self.web_search_bridge = AgentBridge("web-search", self.web_search_agent)
-        
-        # Bootstrap qualitative and quantitative agents
-        # Qualitative agent gets GraphRAG + Web Search
-        self.qualitative_agent = self._load_agent_module(
+        # Bootstrap qualitative and quantitative intelligence agents
+        self.qualitativeAgent = self._initializeAgentFromSpec(
             "qualitative_agent.md", 
-            mcp_bridge=self.bridges["graphrag"],
-            agent_bridge=self.web_search_bridge
+            mcpProvider=self.toolProviders["graphrag"],
+            agentAdapter=self.webSearchAdapter
         )
         
-        # Quantitative agent stays purely financial (no web search to prevent noise)
-        self.quantitative_agent = self._load_agent_module(
+        self.quantitativeAgent = self._initializeAgentFromSpec(
             "quantitative_agent.md", 
-            mcp_bridge=self.bridges["finance"]
+            mcpProvider=self.toolProviders["finance"]
         )
         
-        # Synthesis agent gets Web Search for final gap filling
-        self.synthesis_agent = self._load_agent_module(
+        self.synthesisAgent = self._initializeAgentFromSpec(
             "synthesis_agent.md",
-            agent_bridge=self.web_search_bridge
+            agentAdapter=self.webSearchAdapter
         )
         
-        # Momentum agent (optional depending on mode, but loaded for simplicity)
-        self.momentum_agent = self._load_agent_module(
+        self.momentumAgent = self._initializeAgentFromSpec(
             "momentum_agent.md",
-            agent_bridge=self.web_search_bridge
+            agentAdapter=self.webSearchAdapter
         )
         
-        logger.info(f"Orchestrator online. Mode: {self.mode} | Model: {self.model}")
+        logger.info(f"ResearchOrchestrator online. Mode: {self.mode} | Model: {self.model}")
     
-    def _load_agent_module(
+    def _initializeAgentFromSpec(
         self, 
         filename: str, 
-        mcp_bridge: Optional[MCPBridge] = None,
-        agent_bridge: Optional[AgentBridge] = None
+        mcpProvider: Optional[McpToolProvider] = None,
+        agentAdapter: Optional[InternalAgentAdapter] = None
     ) -> Agent:
-        """Instantiate an agent from a markdown definition file"""
-        full_path = self.agents_dir / filename
-        with open(full_path, 'r', encoding='utf-8') as agent_file:
-            raw_content = agent_file.read()
-        agent_profile = AgentDefinitionParser.parse_markdown(raw_content)
-        return Agent(agent_profile, self.api_key, self.model, mcp_bridge, agent_bridge)
+        """Instantiate a specialized Agent from a markdown persona specification."""
+        fullPath = self.agentsDir / filename
+        with open(fullPath, 'r', encoding='utf-8') as specFile:
+            rawSpec = specFile.read()
+        agentProfile = AgentSpecLoader.loadFromMarkdown(rawSpec)
+        
+        return Agent(
+            agentProfile, 
+            self.llmClient, 
+            self.model, 
+            mcpProvider, 
+            agentAdapter
+        )
     
     async def cleanup(self):
-        """Standard teardown for all active MCP bridges"""
-        for active_bridge in self.bridges.values():
-            await active_bridge.cleanup()
+        """Teardown of all active mcp tool providers."""
+        for provider in self.toolProviders.values():
+            await provider.cleanup()
 
-    async def research(self, investment_query: str) -> Dict:
+    async def executeResearchSession(self, investmentQuery: str) -> Dict:
         """
-        Executes the full multi-agent workflow:
-        Phase 1: Parallel Specialized Analysis
-        Phase 2: Initial Synthesis
-        Phase 3: Recursive Clarification
-        Phase 4: Final Unified Thesis
+        Executes the full multi-agent research workflow via modular phase methods.
         """
-        logger.info(f"\n[RESEARCH QUERY] {investment_query}\n")
+        logger.info(f"\n[RESEARCH QUERY] {investmentQuery}\n")
         
         try:
-            # Pre-connect bridges to ensure task consistency (cancel scope shielding)
-            for bridge_name, target_bridge in self.bridges.items():
+            # Standby verification for tool providers
+            for providerName, provider in self.toolProviders.items():
                 try:
-                    await target_bridge.connect()
-                except Exception as connection_err:
-                    logger.warning(f"Bridge connection standby failure [{bridge_name}]: {connection_err}")
+                    await provider.connect()
+                except Exception as connectionErr:
+                    logger.warning(f"Standby failure for Tool Provider [{providerName}]: {connectionErr}")
 
-            # Phase 1: Parallel specialized analysis
-            logger.info("PHASE 1: Execution started (Qual/Quant agents)...")
-            
-            analysis_snapshots = {}
-            async with anyio.create_task_group() as task_group:
-                async def _run_qualitative():
-                    analysis_snapshots['qual'] = await self._invoke_agent_safe(self.qualitative_agent, investment_query)
-                async def _run_quantitative():
-                    analysis_snapshots['quant'] = await self._invoke_agent_safe(self.quantitative_agent, investment_query)
-                
-                task_group.start_soon(_run_qualitative)
-                task_group.start_soon(_run_quantitative)
-
-            qual_results = analysis_snapshots['qual']
-            quant_results = analysis_snapshots['quant']
-            
-            if qual_results.error or quant_results.error:
-                return {
-                    "error": "Specialized analysis phase failed",
-                    "qual_error": qual_results.error,
-                    "quant_error": quant_results.error
-                }
-
-            await anyio.sleep(cfg.config.PHASE_THROTTLE_SECONDS)
-
-            await anyio.sleep(cfg.config.PHASE_THROTTLE_SECONDS)
-
-            # Phase 2: Synthesis / Momentum Analysis
-            logger.info(f"PHASE 2: Generating analysis (Mode: {self.mode})...")
-            
-            synthesis_input = cfg.SYNTHESIS_INPUT_TEMPLATE.format(
-                qual_analysis=qual_results.analysis,
-                quant_analysis=quant_results.analysis
-            )
-
-            results_map = {
-                "qualitative": {"analysis": qual_results.analysis, "clarification": ""},
-                "quantitative": {"analysis": quant_results.analysis, "clarification": ""},
+            # Define State Map
+            researchStateMap = {
+                "qualitative": {"analysis": "", "clarification": ""},
+                "quantitative": {"analysis": "", "clarification": ""},
                 "synthesis": {},
                 "momentum": {}
             }
 
-            # --- Fundamental Synthesis Path ---
+            # Phase 1: Parallel Specialized Intelligence Analysis
+            # ------------------------------------------------------------------
+            qualResults, quantResults = await self.phase1_ParallelAnalysis(investmentQuery)
+            
+            researchStateMap["qualitative"]["analysis"] = qualResults.analysis
+            researchStateMap["quantitative"]["analysis"] = quantResults.analysis
+            
+            if qualResults.error or quantResults.error:
+                 return {"error": f"Phase 1 Failure: Qual({qualResults.error}) Quant({quantResults.error})"}
+            
+            await anyio.sleep(self.PHASE_THROTTLE_SECONDS)
+
+            # --- Fundamental Research Track ---
             if self.mode in ["fundamental", "all"]:
-                # Initial synthesis
-                initial_synth = await self.synthesis_agent.analyze(synthesis_input)
-                await anyio.sleep(cfg.config.PHASE_THROTTLE_SECONDS)
-
-                # Recursive Clarification
-                logger.info("PHASE 3 (Fundamental): Seeking cross-agent clarifications...")
-                qual_clarification = await self.qualitative_agent.answer_question(
-                    cfg.QUAL_RECURSIVE_QUESTION, qual_results.analysis
-                )
-                quant_clarification = await self.quantitative_agent.answer_question(
-                    cfg.QUANT_RECURSIVE_QUESTION, quant_results.analysis
-                )
                 
-                results_map["qualitative"]["clarification"] = qual_clarification
-                results_map["quantitative"]["clarification"] = quant_clarification
-                
-                await anyio.sleep(cfg.config.PHASE_THROTTLE_SECONDS)
+                # Phase 2: Synthesis
+                # ------------------------------------------------------------------
+                initialSynthesis = await self.phase2_Synthesis(qualResults.analysis, quantResults.analysis)
+                researchStateMap["synthesis"]["initialSynthesis"] = initialSynthesis
+                await anyio.sleep(self.PHASE_THROTTLE_SECONDS)
 
-                # Final Consolidation
-                logger.info("PHASE 4 (Fundamental): Consolidating confirmation...")
-                final_prompt = cfg.FINAL_CONSOLIDATION_TEMPLATE.format(
-                    initial_synthesis=initial_synth,
-                    qual_clarification=qual_clarification,
-                    quant_clarification=quant_clarification
+                # Phase 3: Clarification
+                # ------------------------------------------------------------------
+                qualClar, quantClar = await self.phase3_Clarification(
+                    qualResults.analysis, 
+                    quantResults.analysis
                 )
-                final_recommendation = await self.synthesis_agent.analyze(final_prompt)
-                results_map["synthesis"]["final_recommendation"] = final_recommendation
+                researchStateMap["qualitative"]["clarification"] = qualClar
+                researchStateMap["quantitative"]["clarification"] = quantClar
+                
+                await anyio.sleep(self.PHASE_THROTTLE_SECONDS)
 
-            # --- Momentum Analysis Path ---
+                # Phase 4: Final Consolidation
+                # ------------------------------------------------------------------
+                finalThesis = await self.phase4_Consolidation(
+                    initialSynthesis, 
+                    qualClar, 
+                    quantClar,
+                    qualAnalysis=qualResults.analysis,
+                    quantAnalysis=quantResults.analysis
+                )
+                researchStateMap["synthesis"]["finalRecommendation"] = finalThesis
+
+            # --- Momentum Strategy Track ---
             if self.mode in ["momentum", "all"]:
-                logger.info("PHASE 2b (Momentum): Generating swing trade analysis...")
-                
-                # Momentum agent consumes raw Qual/Quant + any clarifications if available
-                # If we skipped fundamental path, clarifications are empty, which is fine
-                momentum_input = cfg.MOMENTUM_CONSOLIDATION_TEMPLATE.format(
-                    qual_analysis=qual_results.analysis,
-                    quant_analysis=quant_results.analysis,
-                    qual_clarification=results_map["qualitative"]["clarification"] or "N/A (Fundamental Mode Skipped)",
-                    quant_clarification=results_map["quantitative"]["clarification"] or "N/A (Fundamental Mode Skipped)"
+                momentumThesis = await self.phase_MomentumStyling(
+                    qualResults.analysis,
+                    quantResults.analysis,
+                    researchStateMap["qualitative"]["clarification"],
+                    researchStateMap["quantitative"]["clarification"]
                 )
-                
-                momentum_analysis = await self.momentum_agent.analyze(momentum_input)
-                results_map["momentum"]["analysis"] = momentum_analysis
+                researchStateMap["momentum"]["analysis"] = momentumThesis
 
-            # Construct Result Object
-            research_result = {
-                "query": investment_query,
+            # Final Session Output
+            sessionResult = {
+                "query": investmentQuery,
                 "timestamp": datetime.now().isoformat(),
                 "mode": self.mode,
-                "agents": results_map
+                "agents": researchStateMap
             }
             
-            # Save final report to file
-            self.save_results(research_result)
-            return research_result
+            # Export Final Markdown Artifact
+            self.exportResearchReport(sessionResult)
+            return sessionResult
 
         except Exception as exc:
-            logger.error(f"Research error: {exc}", exc_info=True)
+            logger.error(f"Research Session failed: {exc}", exc_info=True)
             return {"error": str(exc)}
         finally:
             await self.cleanup()
 
-    async def _invoke_agent_safe(self, agent: Agent, task: str) -> ResearchResult:
-        """Shielded agent execution to prevent individual failure from crashing the group"""
-        try:
-            analysis_output = await agent.analyze(task)
-            return ResearchResult(agent.profile.name, analysis_output, datetime.now())
-        except Exception as invocation_error:
-            logger.error(f"Agent invocation failed [{agent.profile.name}]: {invocation_error}")
-            return ResearchResult(agent.profile.name, "", datetime.now(), str(invocation_error))
+    # --- Modular Phase Methods ---
 
-    def save_results(self, result: Dict):
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        path = self.output_dir / f"research_{result['mode']}_{timestamp}.md"
+    async def phase1_ParallelAnalysis(self, query: str) -> (ResearchResult, ResearchResult):
+        """Execute Phase 1: Parallel Specialized Intelligence (Qual/Quant)."""
+        logger.info("PHASE 1: Execution started (Qual/Quant agents)...")
+        intelligenceSnapshots = {}
         
-        # Base report with Qual/Quant data (always present)
-        report_md = cfg.MARKDOWN_REPORT_TEMPLATE.format(
-            query=result['query'],
-            qual_analysis=result['agents']['qualitative']['analysis'],
-            qual_clarification=result['agents']['qualitative']['clarification'],
-            quant_analysis=result['agents']['quantitative']['analysis'],
-            quant_clarification=result['agents']['quantitative']['clarification'],
-            final_recommendation=result['agents'].get('synthesis', {}).get('final_recommendation', 'N/A (Momentum Mode Only)')
+        async with anyio.create_task_group() as taskGroup:
+            async def _runQualitativeBranch():
+                intelligenceSnapshots['qual'] = await self._executeAgentTaskWithSafety(self.qualitativeAgent, query)
+            async def _runQuantitativeBranch():
+                intelligenceSnapshots['quant'] = await self._executeAgentTaskWithSafety(self.quantitativeAgent, query)
+            
+            taskGroup.start_soon(_runQualitativeBranch)
+            taskGroup.start_soon(_runQuantitativeBranch)
+            
+        return intelligenceSnapshots['qual'], intelligenceSnapshots['quant']
+
+    async def phase2_Synthesis(self, qualAnalysis: str, quantAnalysis: str) -> str:
+        """Execute Phase 2: Initial Intelligence Synthesis."""
+        logger.info(f"PHASE 2: Collaborative analysis initiated...")
+        synthesisInput = cfg.SYNTHESIS_INPUT_TEMPLATE.format(
+            qualAnalysis=qualAnalysis,
+            quantAnalysis=quantAnalysis
+        )
+        return await self.synthesisAgent.performResearchTask(synthesisInput)
+
+    async def phase3_Clarification(self, qualAnalysis: str, quantAnalysis: str) -> (str, str):
+        """Execute Phase 3: Recursive Cross-Verification."""
+        logger.info("PHASE 3 (Fundamental): Initiating recursive cross-verification...")
+        qualTask = self.qualitativeAgent.provideRecursiveAnalysis(cfg.QUAL_RECURSIVE_QUESTION, qualAnalysis)
+        quantTask = self.quantitativeAgent.provideRecursiveAnalysis(cfg.QUANT_RECURSIVE_QUESTION, quantAnalysis)
+        
+        results = await asyncio.gather(qualTask, quantTask)
+        return results[0], results[1]
+
+    def _prepareIntelligenceContext(
+        self, 
+        qualAnalysis: str = "N/A", 
+        quantAnalysis: str = "N/A", 
+        qualClar: str = "N/A", 
+        quantClar: str = "N/A", 
+        initialSynthesis: str = "N/A"
+    ) -> str:
+        """Helper to consolidate various intelligence strands into a single prompt context."""
+        return cfg.AGENTS_INFORMATION_CONTEXT_TEMPLATE.format(
+            qualAnalysis=qualAnalysis or "N/A",
+            quantAnalysis=quantAnalysis or "N/A",
+            qualClarification=qualClar or "N/A",
+            quantClarification=quantClar or "N/A",
+            initialSynthesis=initialSynthesis or "N/A"
         )
         
-        # Append Momentum Section if active
-        if result['mode'] in ['momentum', 'all']:
-            momentum_section = cfg.MOMENTUM_REPORT_SECTION.format(
-                momentum_analysis=result['agents']['momentum']['analysis']
-            )
-            report_md += momentum_section
+    async def phase4_Consolidation(
+        self, 
+        initialSynthesis: str, 
+        qualClarification: str, 
+        quantClarification: str,
+        qualAnalysis: str = "N/A",
+        quantAnalysis: str = "N/A"
+    ) -> str:
+        """Execute Phase 4: Final Investment Thesis Consolidation."""
+        logger.info("PHASE 4 (Fundamental): Finalizing unified investment thesis...")
         
-        with open(path, 'w', encoding='utf-8') as report_file:
-            report_file.write(report_md)
-        logger.info(f"Report saved to {path}")
+        consolidationInput = self._prepareIntelligenceContext(
+            qualAnalysis=qualAnalysis,
+            quantAnalysis=quantAnalysis,
+            qualClar=qualClarification,
+            quantClar=quantClarification,
+            initialSynthesis=initialSynthesis
+        )
+        
+        return await self.synthesisAgent.performResearchTask(consolidationInput)
 
+    async def phase_MomentumStyling(
+        self, 
+        qualAnalysis: str, 
+        quantAnalysis: str, 
+        qualClar: str, 
+        quantClar: str
+    ) -> str:
+        """Execute Momentum Analysis Phase using consolidated intelligence."""
+        logger.info("PHASE 2b (Momentum): Generating reactive swing trade profile...")
+        
+        momentumInput = self._prepareIntelligenceContext(
+            qualAnalysis=qualAnalysis,
+            quantAnalysis=quantAnalysis,
+            qualClar=qualClar,
+            quantClar=quantClar,
+            initialSynthesis="N/A" # Momentum agent does not consume initial synthesis typically
+        )
+        
+        return await self.momentumAgent.performResearchTask(momentumInput)
+
+
+    async def _runAgentTask(self, agent: Agent, task: str) -> str:
+        """Raw agent task execution, serving as a clean entry point for unit tests."""
+        return await agent.performResearchTask(task)
+
+    async def _executeAgentTaskWithSafety(self, agent: Agent, task: str) -> ResearchResult:
+        """Shielded agent execution with persistent error handling and structured result wrapping."""
+        try:
+            analysisOutput = await self._runAgentTask(agent, task)
+            return ResearchResult(agent.profile.name, analysisOutput, datetime.now())
+        except Exception as invocationError:
+            logger.error(f"Agent [{agent.profile.name}] execution fault: {invocationError}")
+            return ResearchResult(agent.profile.name, "", datetime.now(), str(invocationError))
+
+    def exportResearchReport(self, result: Dict):
+        """Generates and writes a formatted markdown report based on the research results."""
+        creationTime = datetime.now().strftime("%Y%m%d_%H%M%S")
+        outputFilepath = self.outputDir / f"research_{result['mode']}_{creationTime}.md"
+        
+        # Format core intelligence sections
+        compositeReport = cfg.MARKDOWN_REPORT_TEMPLATE.format(
+            query=result['query'],
+            qualAnalysis=result['agents']['qualitative']['analysis'],
+            qualClarification=result['agents']['qualitative']['clarification'],
+            quantAnalysis=result['agents']['quantitative']['analysis'],
+            quantClarification=result['agents']['quantitative']['clarification'],
+            finalRecommendation=result['agents'].get('synthesis', {}).get('finalRecommendation', 'N/A (Momentum-only Mode)')
+        )
+        
+        # Inject Momentum Insights if applicable
+        if result['mode'] in ['momentum', 'all']:
+            momentumIntelligence = cfg.MOMENTUM_REPORT_SECTION.format(
+                momentumAnalysis=result['agents']['momentum']['analysis']
+            )
+            compositeReport += momentumIntelligence
+        
+        with open(outputFilepath, 'w', encoding='utf-8') as artifact:
+            artifact.write(compositeReport)
+        logger.info(f"Research artifact exported to {outputFilepath}")
 
 
 async def main():
     try:
-        cfg.config.validate()
+        cfg.config.verifyConfiguration()
     except ValueError as e:
         print(e)
         return
         
-    query = input(f"Enter investment query [{cfg.config.DEFAULT_INVESTMENT_QUERY}]: ").strip() or cfg.config.DEFAULT_INVESTMENT_QUERY
+    query = input(f"Enter target query [{cfg.config.DEFAULT_INVESTMENT_QUERY}]: ").strip() or cfg.config.DEFAULT_INVESTMENT_QUERY
     
-    print("\nSelect Analysis Mode:")
-    print("1. Fundamental (Long-term value synthesis)")
-    print("2. Momentum (Swing trade swing setup)")
-    print("3. All (Comprehensive report)")
-    mode_selection = input("Choice [3]: ").strip()
+    print("\nSelect Investigation Strategy:")
+    print("1. Fundamental (Long-term strategic synthesis)")
+    print("2. Momentum (Reactive swing setup identification)")
+    print("3. Comprehensive (Full intelligence cycle)")
+    strategyInput = input("Choice [3]: ").strip()
     
-    mode_map = {"1": "fundamental", "2": "momentum", "3": "all"}
-    selected_mode = mode_map.get(mode_selection, "all")
+    strategyMap = {"1": "fundamental", "2": "momentum", "3": "all"}
+    selectedStrategy = strategyMap.get(strategyInput, "all")
     
-    orchestrator = MultiAgentOrchestrator(mode=selected_mode)
-    result = await orchestrator.research(query)
+    orchestrator = ResearchOrchestrator(mode=selectedStrategy)
+    sessionData = await orchestrator.executeResearchSession(query)
     
-    if "error" not in result:
-        print("\n=== ANALYSIS COMPLETE ===")
-        print(f"Report generated in: {result['mode']} mode")
+    if "error" not in sessionData:
+        print("\n=== INVESTIGATION COMPLETE ===")
+        print(f"Strategy: {sessionData['mode']} | Artifact: output/research_...")
     else:
-        print(f"\nError: {result['error']}")
+        print(f"\nInvestigation Fault: {sessionData['error']}")
 
 if __name__ == "__main__":
     anyio.run(main)

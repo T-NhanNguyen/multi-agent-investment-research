@@ -21,16 +21,16 @@ app.add_middleware(
 
 # Initialize and patch on startup
 @app.on_event("startup")
-async def startup_event():
+async def _startupEvent():
     # Patch the multi-agent system
     patch_multi_agent()
     
     # Initialize agent list
-    agents_dir = Path(__file__).parent / "agent-definition-files"
-    initialize_monitoring(agents_dir)
+    agentsDir = Path(__file__).parent / "agent-definition-files"
+    initialize_monitoring(agentsDir)
 
 @app.get("/api/status")
-async def get_status():
+async def _getStatus():
     """Polling endpoint for the frontend to get current workflow state"""
     return state.to_dict()
 
@@ -39,23 +39,23 @@ async def health():
     return {"status": "ok"}
 
 @app.post("/api/research")
-async def start_research(query: str, mode: str = "all"):
+async def _startResearch(query: str, mode: str = "all"):
     """
     Trigger research via API (for testing monitoring)
     In a real scenario, this would import the orchestrator and run it.
     """
-    from multi_agent_investment import MultiAgentOrchestrator
+    from multi_agent_investment import ResearchOrchestrator
     
-    orchestrator = MultiAgentOrchestrator(mode=mode)
+    orchestrator = ResearchOrchestrator(mode=mode)
     
     # Run research in background so API remains responsive
-    async def run_research():
+    async def _runResearch():
         try:
-            await orchestrator.research(query)
+            await orchestrator.executeResearchSession(query)
         except Exception as e:
             print(f"Research failed: {e}")
             
-    asyncio.create_task(run_research())
+    asyncio.create_task(_runResearch())
     
     return {"message": "Research started", "workflowId": state.workflow_id}
 

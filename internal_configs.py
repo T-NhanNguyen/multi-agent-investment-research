@@ -38,27 +38,30 @@ class AppConfig:
     # Defaults
     DEFAULT_INVESTMENT_QUERY: str = "Analyze Tesla (TSLA)"
 
-    def validate(self):
-        """Strict validation of required environment variables"""
-        missing_vars = []
+    def verifyConfiguration(self):
+        """
+        Strict validation of required environment variables.
+        Ensures the system fails fast if the operational bedrock is missing.
+        """
+        missingVars = []
         if not self.OPENROUTER_API_KEY:
-            missing_vars.append("OPENROUTER_API_KEY")
+            missingVars.append("OPENROUTER_API_KEY")
         if not self.PRIMARY_MODEL:
-            missing_vars.append("MODEL_NAME")
+            missingVars.append("MODEL_NAME")
         if not self.GRAPHRAG_REGISTRY_DIR:
-            missing_vars.append("GRAPHRAG_REGISTRY_DIR")
+            missingVars.append("GRAPHRAG_REGISTRY_DIR")
         if not self.GRAPHRAG_PROJECT_PATH:
-            missing_vars.append("GRAPHRAG_PROJECT_PATH")
+            missingVars.append("GRAPHRAG_PROJECT_PATH")
             
-        if missing_vars:
-            error_msg = (
+        if missingVars:
+            errorReport = (
                 "\n" + "!" * 50 + "\n"
                 "CRITICAL ERROR: Environment Configuration Incomplete\n"
-                f"Missing variables: {', '.join(missing_vars)}\n"
+                f"Missing variables: {', '.join(missingVars)}\n"
                 "Please check your .env file and ensure these are set.\n"
                 "!" * 50 + "\n"
             )
-            raise ValueError(error_msg)
+            raise ValueError(errorReport)
 
 # Global config instance
 config = AppConfig()
@@ -94,7 +97,7 @@ WEB_SEARCH_TOOL_DEFINITION = {
 # Template for follow-up questions in Agent class
 FOLLOW_UP_PROMPT_TEMPLATE = """
 Reference Analysis:
-{original_analysis}
+{originalAnalysis}
 
 Query: {question}
 
@@ -104,39 +107,31 @@ Apply {specialization} domain expertise to respond.
 # Template for Phase 2 synthesis
 SYNTHESIS_INPUT_TEMPLATE = """
 Qualitative Analysis:
-{qual_analysis}
+{qualAnalysis}
 
 Quantitative Analysis:
-{quant_analysis}"""
+{quantAnalysis}"""
 
 # Questions for Phase 3 recursive clarification
 QUAL_RECURSIVE_QUESTION = "Identify three material structural risks. Rank by impact probability and severity."
 QUANT_RECURSIVE_QUESTION = "Assess metric reliability: stability indicators vs growth projections. State confidence bounds."
 
-# Template for Phase 4 final consolidation
-FINAL_CONSOLIDATION_TEMPLATE = """
-Initial Synthesis:
-{initial_synthesis}
-
-Structural Risk Assessment:
-{qual_clarification}
-
-Quantitative Confidence:
-{quant_clarification}"""
-
-# Template for Momentum Analysis
-MOMENTUM_CONSOLIDATION_TEMPLATE = """
+# Template for consolidating multiple intelligence strands (Fundamental or Momentum)
+AGENTS_INFORMATION_CONTEXT_TEMPLATE = """
 Qualitative Intelligence:
-{qual_analysis}
+{qualAnalysis}
 
 Quantitative Data:
-{quant_analysis}
+{quantAnalysis}
 
 Recursive Risk Insights:
-{qual_clarification}
+{qualClarification}
 
 Recursive Confidence Data:
-{quant_clarification}
+{quantClarification}
+
+Initial Synthesis:
+{initialSynthesis}
 """
 
 # --- Output Templates ---
@@ -144,22 +139,22 @@ Recursive Confidence Data:
 MARKDOWN_REPORT_TEMPLATE = """> Prompt: {query}
 
 ## Qualitative Analysis
-{qual_analysis}
+{qualAnalysis}
 
 ### Risks
-{qual_clarification}
+{qualClarification}
 
 ## Quantitative Analysis
-{quant_analysis}
+{quantAnalysis}
 
 ### Confidence
-{quant_clarification}
+{quantClarification}
 
 ## Final Recommendation
-{final_recommendation}
+{finalRecommendation}
 """
 
 MOMENTUM_REPORT_SECTION = """
 # Momentum Trade Analysis
-{momentum_analysis}
+{momentumAnalysis}
 """
