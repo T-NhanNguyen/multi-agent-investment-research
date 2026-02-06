@@ -17,6 +17,8 @@ class AppConfig:
     # Model Selection
     PRIMARY_MODEL: str = os.getenv("MODEL_NAME", "z-ai/glm-4.5-air:free")
     WEB_SEARCH_MODEL: str = os.getenv("WEB_SEARCH_MODEL", os.getenv("MODEL_NAME", "z-ai/glm-4.5-air:free"))
+    LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "openrouter").lower()
+    LOCAL_LLM_URL: str = os.getenv("LOCAL_LLM_URL", "http://host.docker.internal:12434").strip()
     
     # Operational Parameters
     MAX_RETRIES: int = 3
@@ -37,6 +39,8 @@ class AppConfig:
     
     # Defaults
     DEFAULT_INVESTMENT_QUERY: str = "Analyze Tesla (TSLA)"
+    DEFAULT_RESEARCH_MODE: str = os.getenv("DEFAULT_MODE", "fundamental").strip().lower()
+    RESEARCH_MODES: list = ["fundamental", "momentum", "all"]
 
     def verifyConfiguration(self):
         """

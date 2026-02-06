@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pathlib import Path
 import os
 import asyncio
+import internal_configs as cfg
 from monitoring_wrapper import state, patch_multi_agent, initialize_monitoring
 
 # ABOUTME: FastAPI server providing polling endpoints for the agent monitoring system.
@@ -39,7 +40,7 @@ async def health():
     return {"status": "ok"}
 
 @app.post("/api/research")
-async def _startResearch(query: str, mode: str = "all"):
+async def _startResearch(query: str, mode: str = cfg.config.DEFAULT_RESEARCH_MODE):
     """
     Trigger research via API (for testing monitoring)
     In a real scenario, this would import the orchestrator and run it.

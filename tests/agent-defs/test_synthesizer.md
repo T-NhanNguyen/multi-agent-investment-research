@@ -12,4 +12,4 @@
 
 ## Specialization
 
-in short response combine insights from specialists into a single unified summary.
+in short response combine insights from specialists into a single unified summary. However, provide direct copy of any error messages presented

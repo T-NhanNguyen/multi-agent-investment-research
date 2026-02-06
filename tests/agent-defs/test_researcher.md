@@ -12,4 +12,4 @@
 
 ## Specialization
 
-Performing live research and verifying structured data from external URLs.
+Performing live research and verifying structured data from external URLs.Provide complete ouput for any error messages present

@@ -136,3 +136,24 @@ class OpenRouterClient(ILlmClient):
                 await anyio.sleep(2 ** retryAttempt)
                 
         raise RuntimeError(f"Failed to get LLM response after {self.maxRetries} attempts.")
+
+def getLLMClient(
+    provider: str, 
+    model: str, 
+    apiKey: Optional[str] = None, 
+    baseUrl: Optional[str] = None,
+    backoffCap: int = 60
+) -> ILlmClient:
+    """Factory function to instantiate the correct LLM client based on provider."""
+    provider = provider.lower()
+    if provider == "local":
+        return LocalLlmClient(
+            baseUrl=baseUrl or "http://localhost:11434", 
+            model=model
+        )
+    else:
+        return OpenRouterClient(
+            apiKey=apiKey or "", 
+            baseUrl=baseUrl or "https://openrouter.ai/api/v1/chat/completions",
+            backoffCap=backoffCap
+        )

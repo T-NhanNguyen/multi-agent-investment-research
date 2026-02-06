@@ -130,8 +130,8 @@ def patch_multi_agent():
             state.reset(workflowId, investmentQuery, self.mode)
             logger.info(f"Monitoring started for research session: {workflowId}")
             
-            if not state.agents:
-                initialize_monitoring(self.agentsDir)
+            # Ensure agent monitoring is initialized with the orchestrator's agent dir
+            initialize_monitoring(self.agentsDir)
             
             try:
                 result = await originalResearch(self, investmentQuery)
@@ -169,10 +169,10 @@ def patch_multi_agent():
                         usage = data.get("usage", {})
                         if usage:
                             total = usage.get("total_tokens", 0)
-                            
-                            if name in state.agents:
-                                state.agents[name]["tokensUsed"] += total
-                            state.totalTokens += total
+                            if total > 0:
+                                if name in state.agents:
+                                    state.agents[name]["tokensUsed"] += total
+                                state.totalTokens += total
                             
                         # Capture thoughts/activity
                         choices = data.get("choices", [])
@@ -240,13 +240,6 @@ def patch_multi_agent():
                 raise
 
         McpToolProvider.executeMcpTool = _wrappedCallTool
-        
-        logger.info("Successfully patched Multi-Agent System for monitoring.")
-        
-    except ImportError as e:
-        logger.error(f"Could not find dependencies to patch: {e}")
-    except Exception as e:
-        logger.error(f"Failed to patch multi-agent system: {e}")
         
         logger.info("Successfully patched Multi-Agent System for monitoring.")
         

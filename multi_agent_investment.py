@@ -18,7 +18,7 @@ import anyio
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 import internal_configs as cfg
-from llm_client import OpenRouterClient, ILlmClient
+from llm_client import OpenRouterClient, ILlmClient, getLLMClient
 
 # Environment variables are loaded automatically by internal_configs
 
@@ -404,21 +404,25 @@ class ResearchOrchestrator:
         self, 
         agentsDir: str = None,
         modelName: str = None,
-        mode: str = "all",
+        mode: str = cfg.config.DEFAULT_RESEARCH_MODE,
         outputDirectory: str = cfg.config.OUTPUT_DIR
     ):
         self.mode = mode.lower()
-        if self.mode not in ["fundamental", "momentum", "all"]:
-            raise ValueError("Invalid mode. Must be 'fundamental', 'momentum', or 'all'")
+        if self.mode not in cfg.config.RESEARCH_MODES:
+            raise ValueError(f"Invalid mode. Must be one of {cfg.config.RESEARCH_MODES}")
 
         # Strict environment validation
         cfg.config.verifyConfiguration()
         self.apiKey = cfg.config.OPENROUTER_API_KEY
         
         # Initialize Shared LLM Client
-        self.llmClient = OpenRouterClient(
-            apiKey=self.apiKey, 
-            baseUrl=OPENROUTER_CHAT_ENDPOINT,
+        
+        # Use OpenRouter for search grounding, but use factory for main logic
+        self.llmClient = getLLMClient(
+            provider=cfg.config.LLM_PROVIDER,
+            model=cfg.config.PRIMARY_MODEL,
+            apiKey=self.apiKey,
+            baseUrl=cfg.config.LOCAL_LLM_URL if cfg.config.LLM_PROVIDER == "local" else OPENROUTER_CHAT_ENDPOINT,
             backoffCap=cfg.config.RATE_LIMIT_BACKOFF_CAP
         )
         
