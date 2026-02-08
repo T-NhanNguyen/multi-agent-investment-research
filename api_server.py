@@ -60,6 +60,44 @@ async def _startResearch(query: str, mode: str = cfg.config.DEFAULT_RESEARCH_MOD
     
     return {"message": "Research started", "workflowId": state.workflow_id}
 
+@app.get("/api/papers")
+async def _listPapers():
+    """Returns a list of all research .md files in the output directory, newest first."""
+    outputDir = Path(__file__).parent / "output"
+    if not outputDir.exists():
+        return []
+    
+    files = sorted(
+        outputDir.glob("*.md"),
+        key=lambda f: f.stat().st_mtime,
+        reverse=True
+    )
+    return [
+        {
+            "filename": f.name,
+            "size": f.stat().st_size,
+            "modified": f.stat().st_mtime
+        }
+        for f in files
+    ]
+
+@app.get("/api/papers/{filename}")
+async def _getPaper(filename: str):
+    """Returns the content of a specific research paper."""
+    outputDir = Path(__file__).parent / "output"
+    filepath = outputDir / filename
+    
+    if not filepath.exists() or filepath.suffix != ".md":
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="Paper not found")
+        
+    try:
+        content = filepath.read_text(encoding="utf-8")
+        return {"filename": filename, "content": content}
+    except Exception as e:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=500, detail=str(e))
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)

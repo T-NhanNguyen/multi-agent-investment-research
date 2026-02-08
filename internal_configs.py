@@ -2,7 +2,7 @@
 # ABOUTME: Contains tool definitions, prompt templates, and output formats.
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from dotenv import load_dotenv
 
 # Load environment variables early to ensure AppConfig picks them up
@@ -40,7 +40,7 @@ class AppConfig:
     # Defaults
     DEFAULT_INVESTMENT_QUERY: str = "Analyze Tesla (TSLA)"
     DEFAULT_RESEARCH_MODE: str = os.getenv("DEFAULT_MODE", "fundamental").strip().lower()
-    RESEARCH_MODES: list = ["fundamental", "momentum", "all"]
+    RESEARCH_MODES: list = field(default_factory=lambda: ["fundamental", "momentum", "all"])
 
     def verifyConfiguration(self):
         """
