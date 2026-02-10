@@ -17,6 +17,7 @@ import httpx
 import anyio
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
+from output_pruner import pruneAgentOutput
 import internal_configs as cfg
 from llm_client import OpenRouterClient, ILlmClient, getLLMClient
 
@@ -347,8 +348,11 @@ class Agent:
         """
         Answer follow-up clarification questions from synthesis agent during recursive refinement.
         """
+        # Prune original analysis for context efficiency
+        prunedAnalysis = pruneAgentOutput(originalAnalysis)
+        
         clarificationPrompt = cfg.FOLLOW_UP_PROMPT_TEMPLATE.format(
-            originalAnalysis=originalAnalysis,
+            originalAnalysis=prunedAnalysis,
             question=question,
             specialization=self.profile.specialization
         )
@@ -551,9 +555,14 @@ class ResearchOrchestrator:
             # ------------------------------------------------------------------
             qualResults, quantResults = await self.phase1_ParallelAnalysis(investmentQuery)
             
+            # Persist RAW analysis for final report generation
             researchStateMap["qualitative"]["analysis"] = qualResults.analysis
             researchStateMap["quantitative"]["analysis"] = quantResults.analysis
             
+            # Prune for handoff: Optimize for inter-agent context windows
+            prunedQual = pruneAgentOutput(qualResults.analysis, agentType="qualitative")
+            prunedQuant = pruneAgentOutput(quantResults.analysis, agentType="quantitative")
+
             if qualResults.error or quantResults.error:
                  return {"error": f"Phase 1 Failure: Qual({qualResults.error}) Quant({quantResults.error})"}
             
@@ -564,15 +573,15 @@ class ResearchOrchestrator:
                 
                 # Phase 2: Synthesis
                 # ------------------------------------------------------------------
-                initialSynthesis = await self.phase2_Synthesis(qualResults.analysis, quantResults.analysis)
+                initialSynthesis = await self.phase2_Synthesis(prunedQual, prunedQuant)
                 researchStateMap["synthesis"]["initialSynthesis"] = initialSynthesis
                 await anyio.sleep(self.PHASE_THROTTLE_SECONDS)
 
                 # Phase 3: Clarification
                 # ------------------------------------------------------------------
                 qualClar, quantClar = await self.phase3_Clarification(
-                    qualResults.analysis, 
-                    quantResults.analysis
+                    prunedQual, 
+                    prunedQuant
                 )
                 researchStateMap["qualitative"]["clarification"] = qualClar
                 researchStateMap["quantitative"]["clarification"] = quantClar
@@ -581,22 +590,28 @@ class ResearchOrchestrator:
 
                 # Phase 4: Final Consolidation
                 # ------------------------------------------------------------------
+                # Prune clarification findings and initial synthesis for final consolidation
+                prunedQualClar = pruneAgentOutput(qualClar, agentType="qualitative")
+                prunedQuantClar = pruneAgentOutput(quantClar, agentType="quantitative")
+                prunedSynthesis = pruneAgentOutput(initialSynthesis, agentType="synthesis")
+
                 finalThesis = await self.phase4_Consolidation(
-                    initialSynthesis, 
-                    qualClar, 
-                    quantClar,
-                    qualAnalysis=qualResults.analysis,
-                    quantAnalysis=quantResults.analysis
+                    prunedSynthesis, 
+                    prunedQualClar, 
+                    prunedQuantClar,
+                    qualAnalysis=prunedQual,
+                    quantAnalysis=prunedQuant
                 )
                 researchStateMap["synthesis"]["finalRecommendation"] = finalThesis
 
             # --- Momentum Strategy Track ---
             if self.mode in ["momentum", "all"]:
+                # Use pruned intelligence to minimize momentum context pressure
                 momentumThesis = await self.phase_MomentumStyling(
-                    qualResults.analysis,
-                    quantResults.analysis,
-                    researchStateMap["qualitative"]["clarification"],
-                    researchStateMap["quantitative"]["clarification"]
+                    prunedQual,
+                    prunedQuant,
+                    researchStateMap["qualitative"]["clarification"] if self.mode == "momentum" else prunedQualClar,
+                    researchStateMap["quantitative"]["clarification"] if self.mode == "momentum" else prunedQuantClar
                 )
                 researchStateMap["momentum"]["analysis"] = momentumThesis
 

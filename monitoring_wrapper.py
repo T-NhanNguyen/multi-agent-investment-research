@@ -25,30 +25,50 @@ class MonitoringState:
         self.toolCalls: List[Dict[str, Any]] = []
         self.startTime: Optional[str] = None
         self.endTime: Optional[str] = None
+        self.promptTokens: int = 0
+        self.completionTokens: int = 0
         self.totalTokens: int = 0
+        self.totalCharsSaved: int = 0
 
     def reset(self, workflowId: str, query: str, mode: str):
         self.workflowId = workflowId
         self.query = query
         self.mode = mode
-        self.currentPhase = "Phase 1: Parallel Analysis"
         self.startTime = datetime.now().isoformat()
         self.endTime = None
         self.toolCalls = []
+        self.promptTokens = 0
+        self.completionTokens = 0
         self.totalTokens = 0
+        self.totalCharsSaved = 0
         # Agent status will be updated as they are invoked
 
-    def to_dict(self) -> Dict[str, Any]:
         return {
             "workflowId": self.workflowId,
             "query": self.query,
             "mode": self.mode,
             "currentPhase": self.currentPhase,
             "agents": list(self.agents.values()),
-            "toolCalls": self.toolCalls[-50:],  # Return only recent calls
+            "toolCalls": self.toolCalls[-50:],
+            "promptTokens": self.promptTokens,
+            "completionTokens": self.completionTokens,
             "totalTokens": self.totalTokens,
+            "totalCharsSaved": self.totalCharsSaved,
             "startTime": self.startTime,
             "endTime": self.endTime
+        }
+
+    def getOptimizationSummary(self) -> Dict[str, Any]:
+        """Calculate and return intelligence efficiency metrics"""
+        # Note: In production, totalTokens is the PRUNED actual cost.
+        # totalCharsSaved is the aggregate reduction across all handoffs.
+        return {
+            "total_tokens": self.totalTokens,
+            "prompt_tokens": self.promptTokens,
+            "completion_tokens": self.completionTokens,
+            "total_chars_saved": self.totalCharsSaved,
+            # Estimate tokens saved using 1:4 ratio for UI context
+            "estimated_tokens_saved": self.totalCharsSaved // 4
         }
 
 # Global singleton for monitoring state
@@ -168,10 +188,15 @@ def patch_multi_agent():
                         data = response.json()
                         usage = data.get("usage", {})
                         if usage:
-                            total = usage.get("total_tokens", 0)
+                            p_tokens = usage.get("prompt_tokens", 0)
+                            c_tokens = usage.get("completion_tokens", 0)
+                            total = usage.get("total_tokens", p_tokens + c_tokens)
+                            
                             if total > 0:
                                 if name in state.agents:
                                     state.agents[name]["tokensUsed"] += total
+                                state.promptTokens += p_tokens
+                                state.completionTokens += c_tokens
                                 state.totalTokens += total
                             
                         # Capture thoughts/activity
@@ -240,6 +265,33 @@ def patch_multi_agent():
                 raise
 
         McpToolProvider.executeMcpTool = _wrappedCallTool
+        
+        # 4. Patch output_pruner.pruneAgentOutput to track savings
+        try:
+            import output_pruner
+            originalPrune = output_pruner.pruneAgentOutput
+            
+            @functools.wraps(originalPrune)
+            def _wrappedPrune(rawOutput, maxChars=0, agentType="general"):
+                original_len = len(rawOutput) if rawOutput else 0
+                result = originalPrune(rawOutput, maxChars, agentType)
+                pruned_len = len(result)
+                
+                # Update Monitoring State
+                chars_saved = (original_len - pruned_len)
+                state.totalCharsSaved += chars_saved
+                
+                # Active Monitoring Log (Centralized here, not in the functional pruner)
+                if original_len > 0 and chars_saved > 0:
+                    reduction_pct = (chars_saved / original_len) * 100
+                    logger.info(f"Pruning Impact [{agentType}]: {original_len} -> {pruned_len} chars ({reduction_pct:.1f}% reduction)")
+                
+                return result
+            
+            output_pruner.pruneAgentOutput = _wrappedPrune
+            logger.info("Successfully patched Output Pruner for aggregate tracking.")
+        except Exception as pruneError:
+            logger.warning(f"Could not patch Output Pruner: {pruneError}")
         
         logger.info("Successfully patched Multi-Agent System for monitoring.")
         

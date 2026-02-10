@@ -63,15 +63,44 @@ The project adheres to **Test-Driven Development (TDD)**:
 - **Intent-based Naming**: Reveal intent, not implementation (`calculateUserRiskScore` vs `get_api_data`).
 - **Sustainable Engineering**: Every file starts with `ABOUTME` headers. Specification is the contract between human intent and AI implementation.
 
+## Output Pruning Middleware
+
+`output_pruner.py` reduces inter-agent token usage by stripping noise from LLM outputs before they are passed to downstream agents. Pruning is applied at **orchestration boundaries only** — each agent produces its full output, and the orchestrator decides what to forward.
+
+**What gets stripped:**
+
+- Thinking preambles (`"I'll conduct..."`, `"Let me check..."`)
+- Internal workflow headers (`"## Phase 1:"`, `"## Step 1:"`)
+- Standalone separator lines (`---`)
+
+**What is preserved:**
+
+- All data points, metrics, conclusions, and named entities
+- Lines > 200 chars (safety heuristic against false-positive stripping)
+- Raw outputs in `researchStateMap` for final report generation
+
+**Integration points** in `multi_agent_investment.py`:
+
+- Phase 1 → Phase 2 (Synthesis)
+- Phase 1 → Phase 3 (Clarification)
+- Phase 2/3 → Phase 4 (Consolidation)
+- Recursive `provideRecursiveAnalysis` calls
+
+Verified via `tests/test_output_pruning.py` — achieves **>50% token reduction** in a 4-phase mock scenario.
+
 ## Project Structure
 
 - `multi_agent_investment.py`: Core orchestrator and agent reasoning logic.
 - `llm_client.py`: Transport abstraction layer for LLM providers.
 - `internal_configs.py`: Centralized prompt templates and tool schemas.
+- `output_pruner.py`: Stateless utility for pruning LLM noise at inter-agent handoffs.
+- `monitoring_wrapper.py`: Non-invasive instrumentation for token usage and phase tracking.
+- `api_server.py`: FastAPI real-time status endpoint.
 - `agent-definition-files/`: Markdown personas for specialized agents.
 - `tests/`:
   - `test_model_config.py`: Single source of truth for test parameters.
   - `test_mock_workflow.py`: End-to-end integration test.
+  - `test_output_pruning.py`: Token reduction verification (RAW vs PRUNED scenarios).
   - `agent-defs/`: Simplified agent personas for testing.
 
 ---
