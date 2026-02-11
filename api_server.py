@@ -33,7 +33,15 @@ async def _startupEvent():
 @app.get("/api/status")
 async def _getStatus():
     """Polling endpoint for the frontend to get current workflow state"""
-    return state.to_dict()
+    data = state.to_dict()
+    # Merge in optimization metrics for the dashboard view
+    data["optimization"] = state.getOptimizationSummary()
+    return data
+
+@app.get("/api/optimization-summary")
+async def _getOptimizationSummary():
+    """Detailed intelligence efficiency report for PipelineMonitor"""
+    return state.getOptimizationSummary()
 
 @app.get("/api/health")
 async def health():

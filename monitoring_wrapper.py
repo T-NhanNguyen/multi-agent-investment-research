@@ -57,6 +57,22 @@ class MonitoringState:
             "startTime": self.startTime,
             "endTime": self.endTime
         }
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert state to a dictionary for API delivery"""
+        return {
+            "workflowId": self.workflowId,
+            "query": self.query,
+            "mode": self.mode,
+            "currentPhase": self.currentPhase,
+            "agents": list(self.agents.values()),
+            "toolCalls": self.toolCalls[-50:],
+            "promptTokens": self.promptTokens,
+            "completionTokens": self.completionTokens,
+            "totalTokens": self.totalTokens,
+            "totalCharsSaved": self.totalCharsSaved,
+            "startTime": self.startTime,
+            "endTime": self.endTime
+        }
 
     def getOptimizationSummary(self) -> Dict[str, Any]:
         """Calculate and return intelligence efficiency metrics"""
@@ -289,7 +305,9 @@ def patch_multi_agent():
                 return result
             
             output_pruner.pruneAgentOutput = _wrappedPrune
-            logger.info("Successfully patched Output Pruner for aggregate tracking.")
+            # ALSO patch the local reference in multi_agent_investment
+            multi_agent_investment.pruneAgentOutput = _wrappedPrune
+            logger.info("Successfully patched Output Pruner in all modules.")
         except Exception as pruneError:
             logger.warning(f"Could not patch Output Pruner: {pruneError}")
         

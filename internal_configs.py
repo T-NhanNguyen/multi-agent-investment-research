@@ -85,13 +85,17 @@ WEB_SEARCH_TOOL_DEFINITION = {
                     "type": "string",
                     "description": "Specific search query (e.g., 'IREN latest news January 2026')"
                 },
+                "search_rationale": {
+                    "type": "string",
+                    "description": "Critical: Why is this search necessary? What specific intelligence gap are you filling that is NOT in your existing context?"
+                },
                 "max_results": {
                     "type": "integer",
                     "description": "Number of results to fetch",
                     "default": 3
                 }
             },
-            "required": ["query"]
+            "required": ["query", "search_rationale"]
         }
     }
 }
