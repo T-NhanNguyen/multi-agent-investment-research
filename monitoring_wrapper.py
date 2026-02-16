@@ -14,7 +14,8 @@ from contextvars import ContextVar
 from dataclasses import dataclass, asdict, field
 
 try:
-    from multi_agent_investment import ResearchOrchestrator, Agent, McpToolProvider, InternalAgentAdapter
+    from multi_agent_investment import ResearchOrchestrator
+    from agent_engine import Agent, McpToolProvider, InternalAgentAdapter
     import multi_agent_investment
     HAS_ORCHESTRATOR = True
 except ImportError:
@@ -218,7 +219,7 @@ def patch_multi_agent():
         originalResearch = ResearchOrchestrator.executeResearchSession
         
         @functools.wraps(originalResearch)
-        async def _wrappedResearch(self, investmentQuery: str):
+        async def _wrappedResearch(self, investmentQuery: str, **kwargs):
             workflowId = f"wf_{datetime.now().strftime('%H%M%S')}"
             state.reset(workflowId, investmentQuery, self.mode)
             logger.info(f"Monitoring started for research session: {workflowId}")
@@ -227,7 +228,7 @@ def patch_multi_agent():
             initialize_monitoring(self.agentsDir)
             
             try:
-                result = await originalResearch(self, investmentQuery)
+                result = await originalResearch(self, investmentQuery, **kwargs)
                 state.currentPhase = "Complete"
                 state.endTime = datetime.now().isoformat()
                 return result

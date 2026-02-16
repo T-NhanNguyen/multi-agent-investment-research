@@ -39,6 +39,11 @@ class AppConfig:
     GRAPHRAG_PROJECT_PATH: str = os.getenv("GRAPHRAG_PROJECT_PATH", "").strip()
     GRAPHRAG_DATABASE: str = os.getenv("GRAPHRAG_DATABASE", "investment-analysis").strip()
     
+    # API Endpoints
+    OPENROUTER_BASE_URL: str = "https://openrouter.ai/api/v1"
+    OPENROUTER_CHAT_ENDPOINT: str = f"{OPENROUTER_BASE_URL}/chat/completions"
+    OPENROUTER_RESPONSES_ENDPOINT: str = f"{OPENROUTER_BASE_URL}/responses"
+    
     # Defaults
     DEFAULT_INVESTMENT_QUERY: str = "Analyze Tesla (TSLA)"
     DEFAULT_RESEARCH_MODE: str = os.getenv("DEFAULT_MODE", "fundamental").strip().lower()

@@ -1,137 +1,94 @@
-"""
-Integration test using local LLM and Crawl4AI for web content extraction.
-
-Prerequisites:
-1. Local LLM server running at http://host.docker.internal:12434 (or configured in test_model_config.py)
-2. Crawl4AI Docker container running on the host:
-   docker run -d -p 11235:11235 --name crawl4ai --shm-size=1g unclecode/crawl4ai:latest
-   (Tests access it via http://host.docker.internal:11235 from inside the test container)
-   
-This test demonstrates:
-- MCP tool integration (Finance, GraphRAG)
-- Crawl4AI web content extraction (replacing WebSearchAgent)
-- Local LLM inference (replacing OpenRouter)
-"""
-
-import json
-import asyncio
-import sys
-import logging
-from datetime import datetime
+import unittest
+from unittest.mock import MagicMock, AsyncMock, patch
 from pathlib import Path
-
+import sys
 # Fix path to include project root
 project_root = str(Path(__file__).parent.parent)
 if project_root not in sys.path:
     sys.path.append(project_root)
 
-from multi_agent_investment import (
-    Agent, 
-    ResearchResult, 
-    McpToolProvider, 
-    WebSearchAgent, 
-    InternalAgentAdapter, 
-    AgentSpecLoader
-)
-from llm_client import LocalLlmClient
-from tests.test_model_config import settings
-from tests.crawl4ai_agent import Crawl4AiAgent
-from mcp import StdioServerParameters
+# Explicitly import from our NEW refactored engine to ensure it's being tested
+from agent_engine import Agent, AgentSpecLoader, AgentProfile
+from multi_agent_investment import ResearchOrchestrator
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-async def test_integration_workflow():
+class TestAgentEngine(unittest.IsolatedAsyncioTestCase):
     """
-    Verifies the modular orchestration logic using 3 test agents and a LOCAL LLM.
-    Agent A: Uses MCP GraphRAG + Finance
-    Agent B: Uses Crawl4AI for web content extraction
-    Agent C: Synthesizes A and B
+    Tests the core components of agent_engine.py to ensure the refactor is functional.
     """
-    
-    # 1. Load Agent Profiles
-    agents_dir = Path(__file__).parent / "agent-defs"
-    
-    def load_profile(filename):
-        with open(agents_dir / filename, 'r') as f:
-            return AgentSpecLoader.loadFromMarkdown(f.read())
 
-    profile_a = load_profile("test_specialist.md")
-    profile_b = load_profile("test_researcher.md")
-    profile_c = load_profile("test_synthesizer.md")
-
-    # 2. Setup Real Clients & Providers
-    # Use LocalLlmClient instead of Mock
-    llm_client = LocalLlmClient(
-        baseUrl=settings.LLM_URL, 
-        model=settings.LLM_MODEL,
-        temperature=settings.LLM_TEMPERATURE,
-        maxTokens=settings.LLM_MAX_TOKENS
-    )
-    
-    # Real MCP Provider for Agent A (Finance)
-    finance_provider = McpToolProvider("finance", StdioServerParameters(
-        command="docker",
-        args=["run", "-i", "--rm", settings.FINANCE_TOOLS_IMAGE]
-    ))
-    
-    # Real MCP Provider for Agent A (GraphRAG)
-    # Note: We use minimalist args for testing.
-    graphrag_provider = McpToolProvider("graphrag", StdioServerParameters(
-        command="docker",
-        args=["run", "-i", "--rm", settings.GRAPHRAG_IMAGE, "npx", "tsx", "mcp_server.ts"]
-    ))
-
-    # Web Crawling for Agent B using Crawl4AI
-    # --- COMMENTED OUT: Original WebSearchAgent using OpenRouter ---
-    # import internal_configs as cfg
-    # webSearchModel = cfg.config.WEB_SEARCH_MODEL
-    # web_search_agent = WebSearchAgent(cfg.config.OPENROUTER_API_KEY, model=webSearchModel)
-    # web_adapter = InternalAgentAdapter("web", web_search_agent)
-    # --- END COMMENTED OUT ---
-    
-    # Use host.docker.internal to reach host machine from inside Docker container
-    crawl4ai_agent = Crawl4AiAgent(baseUrl="http://host.docker.internal:11235")
-
-    # 4. Initialize Agents
-    agent_a = Agent(profile_a, llm_client, model=settings.LLM_MODEL, mcpProvider=finance_provider)
-    # Agent B will directly use crawl4ai_agent - no adapter needed for now
-    agent_c = Agent(profile_c, llm_client, model=settings.LLM_MODEL)
-
-    # 5. Execute Workflow
-    try:
-        # Connect providers
-        await finance_provider.connect()
-        await graphrag_provider.connect()
+    def test_spec_loader(self):
+        """Verifies AgentSpecLoader correctly parses markdown into AgentProfile."""
+        mock_md = "# Test Agent\n## Specialization\nTest specialist\n## Skills\n- Skill 1\n## Personality\n- Precise"
+        profile = AgentSpecLoader.loadFromMarkdown(mock_md)
         
-        logger.info("Executing Agent A task...")
-        res_a_text = await agent_a.performResearchTask("Check the latest stock prices for Energy Fuels (UUUU) using finance tools.")
-        
-        logger.info("Executing Agent B task...")
-        # Use Crawl4AI to fetch the JSON content directly
-        # target_url = "http://arduino.esp8266.com/stable/package_esp8266com_index.json"
-        target_url="https://www.sec.gov/edgar/search/#/dateRange=1y&ciks=0001801368&entityName=MP%2520Materials%2520Corp.%2520%252F%2520DE%2520(MP)%2520(CIK%25200001801368)"
-        crawled_content = await crawl4ai_agent.fetchUrl(target_url, extractMarkdown=False)
-        
-        # Now ask the LLM to analyze the fetched content
-        res_b_text = await agent_c.performResearchTask(
-            f"Dive through the Insider trading report and calculate the total volumes traded:\n\n{crawled_content[:5000]}"
-        )
-        
-        logger.info(f"Agent B result (via Crawl4AI): {res_b_text}")
+        self.assertIsInstance(profile, AgentProfile)
+        self.assertEqual(profile.name, "Test Agent")
+        self.assertEqual(profile.specialization, "Test specialist")
+        self.assertIn("Skill 1", profile.skills)
 
-        # Synthesis Phase
-        logger.info("Executing Synthesis Phase...")
-        synthesis_prompt = f"Summarize the findings from our specialists.\nTool Specialist (Agent A): {res_a_text}\nWeb Researcher (Agent B): {res_b_text}"
-        final_output = await agent_c.performResearchTask(synthesis_prompt)
+    async def test_agent_logic_and_history(self):
+        """
+        Tests agent_engine.Agent for correct history management and tool routing.
+        This tests the actual code in agent_engine.py without real LLM/MCP.
+        """
+        profile = AgentProfile("Test", ["tools"], ["friendly"], "test", "System Prompt")
+        mock_llm = MagicMock()
+        mock_llm.chatCompletion = AsyncMock(return_value={
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "Hello world"
+                }
+            }]
+        })
 
-        logger.info("\n=== INTEGRATION TEST COMPLETE ===")
-        logger.info(f"Final Synthesis: {final_output}")
+        agent = Agent(profile, mock_llm)
         
-    finally:
-        await finance_provider.cleanup()
-        await graphrag_provider.cleanup()
+        # 1. Perform task
+        response = await agent.performResearchTask("Tell me about stocks")
+        
+        # Verify component behavior from agent_engine.py
+        self.assertEqual(response, "Hello world")
+        # History: [SystemPrompt, UserQuery, AssistantResponse]
+        self.assertEqual(len(agent.messageHistory), 3) 
+        self.assertEqual(agent.messageHistory[0]["role"], "system")
+        self.assertEqual(agent.messageHistory[1]["role"], "user")
+        self.assertEqual(agent.messageHistory[2]["role"], "assistant")
+        
+        # 2. Verify history persistence (the core of our agentic state)
+        await agent.performResearchTask("Follow up")
+        # History: [System, User1, Assist1, User2, Assist2]
+        self.assertEqual(len(agent.messageHistory), 5) 
+
+    async def test_orchestrator_integration(self):
+        """
+        Verifies ResearchOrchestrator correctly integrates the refactored Agent classes.
+        """
+        # Mock LLM to simulate a short fundamental research session
+        mock_llm = MagicMock()
+        mock_llm.chatCompletion = AsyncMock()
+        
+        # Mock responses for: Synthesis Initial -> Quant -> Qual -> Synthesis Final -> Thesis
+        mock_llm.chatCompletion.side_effect = [
+            {"choices": [{"message": {"role": "assistant", "content": "## For Quantitative Agent:\nPrice\n## For Qualitative Agent:\nNews"}}]},
+            {"choices": [{"message": {"role": "assistant", "content": "Price is 100"}}]},
+            {"choices": [{"message": {"role": "assistant", "content": "News is good"}}]},
+            {"choices": [{"message": {"role": "assistant", "content": "Done"}}]},
+            {"choices": [{"message": {"role": "assistant", "content": "# Final Thesis\nBuy" }}]}
+        ]
+
+        with patch('multi_agent_investment.getLLMClient', return_value=mock_llm), \
+             patch('agent_engine.McpToolProvider.connect', new_callable=AsyncMock), \
+             patch('agent_engine.McpToolProvider.cleanup', new_callable=AsyncMock):
+            
+            orchestrator = ResearchOrchestrator(mode="fundamental")
+            
+            # This triggers the real logic in Agent and Orchestrator
+            result = await orchestrator.executeResearchSession("BMER", exportReport=False)
+            
+            self.assertIn("# Final Thesis", result["agents"]["synthesis"]["finalRecommendation"])
+            # Ensure the orchestrator's synthesis agent is actually an instance of our new Agent class
+            self.assertIsInstance(orchestrator.synthesisAgent, Agent)
 
 if __name__ == "__main__":
-    asyncio.run(test_integration_workflow())
+    unittest.main()

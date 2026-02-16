@@ -1,8 +1,5 @@
 # Local LLM Client - Entity and relationship extraction via Docker-hosted or OpenRouter models.
-import json
-import re
 import logging
-import uuid
 from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass
 
