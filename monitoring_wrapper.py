@@ -1,18 +1,50 @@
+# ABOUTME: Monitoring state and wrapper logic for multi-agent system.
+# ABOUTME: Intercepts core business logic to provide real-time updates for PipelineMonitor.
+# ABOUTME: totalTokens is DERIVED from per-agent buckets — single source of truth.
+
 import json
 import asyncio
 import logging
+import httpx
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Union
 import functools
 from contextvars import ContextVar
+from dataclasses import dataclass, asdict, field
+
+try:
+    from multi_agent_investment import ResearchOrchestrator, Agent, McpToolProvider, InternalAgentAdapter
+    import multi_agent_investment
+    HAS_ORCHESTRATOR = True
+except ImportError:
+    HAS_ORCHESTRATOR = False
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ABOUTME: Monitoring state and wrapper logic for multi-agent system.
-# ABOUTME: Intercepts core business logic to provide real-time updates for PipelineMonitor.
+@dataclass
+class TokenUsage:
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    cached_tokens: int = 0
+    reasoning_tokens: int = 0
+    cost: float = 0.0
+
+    def add(self, other: 'TokenUsage'):
+        self.prompt_tokens += other.prompt_tokens
+        self.completion_tokens += other.completion_tokens
+        self.total_tokens += other.total_tokens
+        self.cached_tokens += other.cached_tokens
+        self.reasoning_tokens += other.reasoning_tokens
+        self.cost += other.cost
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
 
 class MonitoringState:
     """In-memory state for current research workflow"""
@@ -25,10 +57,21 @@ class MonitoringState:
         self.toolCalls: List[Dict[str, Any]] = []
         self.startTime: Optional[str] = None
         self.endTime: Optional[str] = None
-        self.promptTokens: int = 0
-        self.completionTokens: int = 0
-        self.totalTokens: int = 0
         self.totalCharsSaved: int = 0
+
+    @property
+    def usage(self) -> TokenUsage:
+        """Aggregate usage from all agents."""
+        total = TokenUsage()
+        for agent in self.agents.values():
+            if "usage" in agent:
+                total.add(agent["usage"])
+        return total
+
+    @property
+    def totalTokens(self) -> int:
+        """Derived from agent-level tracking — single source of truth."""
+        return self.usage.total_tokens
 
     def reset(self, workflowId: str, query: str, mode: str):
         self.workflowId = workflowId
@@ -37,11 +80,14 @@ class MonitoringState:
         self.startTime = datetime.now().isoformat()
         self.endTime = None
         self.toolCalls = []
-        self.promptTokens = 0
-        self.completionTokens = 0
-        self.totalTokens = 0
         self.totalCharsSaved = 0
-        # Agent status will be updated as they are invoked
+        # Reset per-agent counters (preserve agent list for UI)
+        for agent in self.agents.values():
+            agent["usage"] = TokenUsage()
+            agent["toolCallsCount"] = 0
+            agent["status"] = "idle"
+            agent["progress"] = 0
+            agent["currentTask"] = None
 
         return {
             "workflowId": self.workflowId,
@@ -50,8 +96,7 @@ class MonitoringState:
             "currentPhase": self.currentPhase,
             "agents": list(self.agents.values()),
             "toolCalls": self.toolCalls[-50:],
-            "promptTokens": self.promptTokens,
-            "completionTokens": self.completionTokens,
+            "usage": self.usage.to_dict(),
             "totalTokens": self.totalTokens,
             "totalCharsSaved": self.totalCharsSaved,
             "startTime": self.startTime,
@@ -59,15 +104,22 @@ class MonitoringState:
         }
     def to_dict(self) -> Dict[str, Any]:
         """Convert state to a dictionary for API delivery"""
+        # Convert agent usage objects to dicts for JSON serialization
+        agents_serializable = []
+        for agent in self.agents.values():
+            a_copy = agent.copy()
+            if "usage" in a_copy and isinstance(a_copy["usage"], TokenUsage):
+                a_copy["usage"] = a_copy["usage"].to_dict()
+            agents_serializable.append(a_copy)
+
         return {
             "workflowId": self.workflowId,
             "query": self.query,
             "mode": self.mode,
             "currentPhase": self.currentPhase,
-            "agents": list(self.agents.values()),
+            "agents": agents_serializable,
             "toolCalls": self.toolCalls[-50:],
-            "promptTokens": self.promptTokens,
-            "completionTokens": self.completionTokens,
+            "usage": self.usage.to_dict(),
             "totalTokens": self.totalTokens,
             "totalCharsSaved": self.totalCharsSaved,
             "startTime": self.startTime,
@@ -75,16 +127,20 @@ class MonitoringState:
         }
 
     def getOptimizationSummary(self) -> Dict[str, Any]:
-        """Calculate and return intelligence efficiency metrics"""
-        # Note: In production, totalTokens is the PRUNED actual cost.
-        # totalCharsSaved is the aggregate reduction across all handoffs.
+        """Calculate and return intelligence efficiency metrics.
+        actual_tokens is DERIVED from per-agent tracking (post-pruning real cost).
+        estimated_pre_pruning_tokens = actual + estimated savings.
+        """
+        actualTokens = self.totalTokens
+        estimatedTokensSaved = self.totalCharsSaved // 4
+        estimatedPrePruningTokens = actualTokens + estimatedTokensSaved
+
         return {
-            "total_tokens": self.totalTokens,
-            "prompt_tokens": self.promptTokens,
-            "completion_tokens": self.completionTokens,
+            "actual_tokens": actualTokens,
+            "usage": self.usage.to_dict(),
             "total_chars_saved": self.totalCharsSaved,
-            # Estimate tokens saved using 1:4 ratio for UI context
-            "estimated_tokens_saved": self.totalCharsSaved // 4
+            "estimated_tokens_saved": estimatedTokensSaved,
+            "estimated_pre_pruning_tokens": estimatedPrePruningTokens,
         }
 
 # Global singleton for monitoring state
@@ -118,7 +174,8 @@ def initialize_monitoring(agentsDir: Path):
             "role": _mapRole(agentId),
             "status": "idle",
             "progress": 0,
-            "tokensUsed": 0,
+            "progress": 0,
+            "usage": TokenUsage(),
             "toolCallsCount": 0,
             "currentTask": None
         }
@@ -134,11 +191,11 @@ def _mapRole(agentId: str) -> str:
 
 def patch_multi_agent():
     """Apply non-invasive patches to the Orchestrator and Agent classes"""
+    if not HAS_ORCHESTRATOR:
+        logger.error("Could not find multi_agent_investment to patch")
+        return
+
     try:
-        from multi_agent_investment import ResearchOrchestrator, Agent, McpToolProvider
-        import multi_agent_investment
-        import httpx
-        import json
         
         # 0. Patch logger to track phase transitions
         originalInfo = multi_agent_investment.logger.info
@@ -209,11 +266,37 @@ def patch_multi_agent():
                             total = usage.get("total_tokens", p_tokens + c_tokens)
                             
                             if total > 0:
-                                if name in state.agents:
-                                    state.agents[name]["tokensUsed"] += total
-                                state.promptTokens += p_tokens
-                                state.completionTokens += c_tokens
-                                state.totalTokens += total
+                                # Extract granular metrics
+                                cached = usage.get("prompt_tokens_details", {}).get("cached_tokens", 0)
+                                reasoning = usage.get("completion_tokens_details", {}).get("reasoning_tokens", 0)
+                                cost = usage.get("cost", 0.0)
+
+                                current_usage = TokenUsage(
+                                    prompt_tokens=p_tokens,
+                                    completion_tokens=c_tokens,
+                                    total_tokens=total,
+                                    cached_tokens=cached,
+                                    reasoning_tokens=reasoning,
+                                    cost=cost
+                                )
+
+                                if name and name in state.agents:
+                                    state.agents[name]["usage"].add(current_usage)
+                                else:
+                                    # Route unattributed tokens to orchestrator bucket
+                                    if "_orchestrator" not in state.agents:
+                                        state.agents["_orchestrator"] = {
+                                            "id": "orchestrator",
+                                            "name": "Orchestrator",
+                                            "role": "Synthesis",
+                                            "status": "active",
+                                            "progress": 0,
+                                            "usage": TokenUsage(),
+                                            "toolCallsCount": 0,
+                                            "currentTask": "System orchestration"
+                                        }
+                                    state.agents["_orchestrator"]["usage"].add(current_usage)
+                                    logger.warning(f"Unattributed tokens ({total}) assigned to Orchestrator (agent name: {name})")
                             
                         # Capture thoughts/activity
                         choices = data.get("choices", [])
@@ -281,6 +364,36 @@ def patch_multi_agent():
                 raise
 
         McpToolProvider.executeMcpTool = _wrappedCallTool
+        
+        # 3b. Patch InternalAgentAdapter.executeMcpTool (same tracking for web search tools)
+        originalAdapterCall = InternalAgentAdapter.executeMcpTool
+        
+        @functools.wraps(originalAdapterCall)
+        async def _wrappedAdapterCallTool(self, name: str, arguments: Dict):
+            startTime = datetime.now()
+            agentName = currentAgent.get()
+            
+            try:
+                result = await originalAdapterCall(self, name, arguments)
+                duration = (datetime.now() - startTime).total_seconds() * 1000
+                
+                state.toolCalls.append({
+                    "id": f"tc_{datetime.now().strftime('%H%M%S%f')}",
+                    "toolName": name,
+                    "agentName": agentName,
+                    "arguments": arguments,
+                    "timestamp": datetime.now().isoformat(),
+                    "executionTimeMs": int(duration)
+                })
+                
+                if agentName and agentName in state.agents:
+                    state.agents[agentName]["toolCallsCount"] += 1
+                
+                return result
+            except Exception as e:
+                raise
+        
+        InternalAgentAdapter.executeMcpTool = _wrappedAdapterCallTool
         
         # 4. Patch output_pruner.pruneAgentOutput to track savings
         try:

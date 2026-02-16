@@ -78,6 +78,10 @@ Prioritize **efficiency** (value toward agent goals) over raw effectiveness. Fav
 - Centralize agent patterns: retry logic, logging, schema validation
 - Fetch Big Once, Cache Computed, Render only Needed
 
+**Aspect-Oriented Programming (AOP)**.
+
+- "Keep the pruner code focused on pruning, and let the monitor focus on counting."
+
 **Constants and Configuration**:
 
 - UPPER_CASE for constants

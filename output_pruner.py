@@ -14,6 +14,10 @@ def pruneAgentOutput(rawOutput: str, maxChars: int = 0, agentType: str = "genera
     if not rawOutput:
         return ""
 
+    # 0. Strip <thought> or similar reasoning blocks
+    rawOutput = re.sub(r'<thought>.*?</thought>', '', rawOutput, flags=re.DOTALL | re.IGNORECASE)
+    rawOutput = re.sub(r'```thought.*?```', '', rawOutput, flags=re.DOTALL | re.IGNORECASE)
+
     lines = rawOutput.splitlines()
     pruned_lines = []
     

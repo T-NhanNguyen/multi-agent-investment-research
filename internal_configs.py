@@ -17,17 +17,19 @@ class AppConfig:
     # Model Selection
     PRIMARY_MODEL: str = os.getenv("MODEL_NAME", "z-ai/glm-4.5-air:free")
     WEB_SEARCH_MODEL: str = os.getenv("WEB_SEARCH_MODEL", os.getenv("MODEL_NAME", "z-ai/glm-4.5-air:free"))
+    INTEGRATION_TEST_MODEL: str = os.getenv("INTEGRATION_TEST_MODEL", "z-ai/glm-4.5-air:free")
     LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "openrouter").lower()
     LOCAL_LLM_URL: str = os.getenv("LOCAL_LLM_URL", "http://host.docker.internal:12434").strip()
     
     # Operational Parameters
     MAX_RETRIES: int = 3
-    RATE_LIMIT_BACKOFF_CAP: int = 120  # seconds
+    MAX_TOOL_CYCLES: int = 15
+    RATE_LIMIT_BACKOFF_CAP: int = 5  # seconds
     PHASE_THROTTLE_SECONDS: float = 1.0
     OUTPUT_DIR: str = os.getenv("OUTPUT_DIR", "./output")
     
     # Docker & MCP Configuration
-    FINANCE_TOOLS_IMAGE: str = "finance-tools"
+    FINANCE_TOOLS_IMAGE: str = os.getenv("FINANCE_TOOLS_IMAGE", "finance-tools-finance-tools")
     GRAPHRAG_IMAGE: str = "graphrag-llamaindex"
     GRAPHRAG_NODE_MODULES_VOLUME: str = "graphrag_node_modules"
     GRAPHRAG_DEFAULT_DB: str = "investment-analysis"
@@ -41,6 +43,10 @@ class AppConfig:
     DEFAULT_INVESTMENT_QUERY: str = "Analyze Tesla (TSLA)"
     DEFAULT_RESEARCH_MODE: str = os.getenv("DEFAULT_MODE", "fundamental").strip().lower()
     RESEARCH_MODES: list = field(default_factory=lambda: ["fundamental", "momentum", "all"])
+    
+    # Synthesis Orchestration
+    MAX_SYNTHESIS_ITERATIONS: int = 1
+    PHASE_THROTTLE_SECONDS: float = 1.0
 
     def verifyConfiguration(self):
         """
@@ -140,6 +146,43 @@ Recursive Confidence Data:
 
 Initial Synthesis:
 {initialSynthesis}
+"""
+
+# --- Synthesis-Driven Iterative Templates ---
+
+# Template for initial query analysis
+SYNTHESIS_INITIAL_PROMPT_TEMPLATE = """
+Analyze this investment query and determine what information you need from the specialized agents (Qualitative and Quantitative).
+
+Query: {investmentQuery}
+
+Your goal is to identify information gaps and generate targeted requests.
+Follow the structured output format defined in your system prompt (Mode 1).
+"""
+
+# Template for subsequent iterations
+SYNTHESIS_ITERATION_PROMPT_TEMPLATE = """
+Specialist Responses (Iteration {iteration}):
+
+## Qualitative Agent:
+{qualResponse}
+
+## Quantitative Agent:
+{quantResponse}
+
+---
+
+Evaluate these results. If significant gaps remain, request targeted follow-ups.
+If you have enough information for a final thesis, signal completion by outputting "Done" or "There is nothing else needed".
+
+Confidence Threshold: If you are 80%+ confident you can derive an answer from existing data, signal completion.
+"""
+
+# Template for final consolidated synthesis
+SYNTHESIS_FINAL_THESIS_TEMPLATE = """
+Research complete. Produce the final investment decision document using all the data we've gathered across our entire conversation.
+
+Follow the writing style guide and templates in your system prompt (Mode 3) and `synthesis_writing_guide.md`.
 """
 
 # --- Output Templates ---

@@ -2,24 +2,21 @@
 # ABOUTME: Manages agent lifecycles, MCP bridge connectivity, and multi-phase research workflows.
 
 
-import os
 import asyncio
 import json
 import logging
 import re
-import ast
 from typing import Dict, List, Optional, Any, Union
 from dataclasses import dataclass, field
 from pathlib import Path
 from datetime import datetime
 from contextlib import AsyncExitStack
 import httpx
-import anyio
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from output_pruner import pruneAgentOutput
 import internal_configs as cfg
-from llm_client import OpenRouterClient, ILlmClient, getLLMClient
+from llm_client import ILlmClient, getLLMClient
 
 # Environment variables are loaded automatically by internal_configs
 
@@ -38,6 +35,7 @@ OPENROUTER_RESPONSES_ENDPOINT = f"{OPENROUTER_BASE_URL}/responses"
 
 
 
+
 @dataclass
 class AgentProfile:
     """Hybrid agent profile with metadata and full specification"""
@@ -46,15 +44,6 @@ class AgentProfile:
     personality: List[str]
     specialization: str
     fullSpec: str  # Complete markdown content as system prompt
-
-
-@dataclass
-class ResearchResult:
-    """Container for agent research results"""
-    agentName: str
-    analysis: str
-    timestamp: datetime
-    error: Optional[str] = None
 
 
 class McpToolProvider:
@@ -132,13 +121,15 @@ class McpToolProvider:
         """Standard teardown for all active session resources."""
         logger.info(f"Cleaning up McpToolProvider [{self.name}]")
         try:
-            # Shield the cleanup to prevent it from being cancelled while running
-            with anyio.CancelScope(shield=True):
-                await self.exitStack.aclose()
+            await self.exitStack.aclose()
+            self.session = None
+        except asyncio.CancelledError:
+            # Cleanup was cancelled during shutdown - suppress it
+            logger.debug(f"Cleanup cancelled for [{self.name}] (shutdown in progress)")
+            # Don't re-raise - let shutdown complete gracefully
         except Exception as exc:
-            # We catch everything during cleanup to ensure we don't crash during shutdown
-            logger.debug(f"Interruption or error during cleanup of [{self.name}]: {exc}")
-
+            # Log but don't raise - cleanup errors during shutdown are expected
+            logger.debug(f"Cleanup exception for [{self.name}]: {exc}")
 
 class WebSearchAgent:
     """Specialized agent using OpenRouter Responses API for web search with task-safe caching"""
@@ -268,6 +259,11 @@ class Agent:
         self.model = model
         self.mcpProvider = mcpProvider
         self.agentAdapter = agentAdapter
+        self.messageHistory: List[Dict[str, Any]] = []
+    
+    def resetHistory(self):
+        """Clears the agent's conversation history for a new research session."""
+        self.messageHistory = []
     
     def _buildSystemPrompt(self) -> str:
         """Constructs the system prompt from the agent's full markdown specification."""
@@ -276,12 +272,14 @@ class Agent:
     async def performResearchTask(self, query: str) -> str:
         """
         Execute analysis task with tool-calling loop.
-        Adheres to agentic focus with deterministic tool execution.
+        Persistent history is maintained across calls unless resetHistory() is called.
         """
-        interactionHistory = [
-            {"role": "system", "content": self.profile.fullSpec},
-            {"role": "user", "content": query}
-        ]
+        # Initialize history if empty
+        if not self.messageHistory:
+            self.messageHistory.append({"role": "system", "content": self.profile.fullSpec})
+        
+        # Add new user query
+        self.messageHistory.append({"role": "user", "content": query})
         
         availableTools = []
         if self.mcpProvider:
@@ -292,16 +290,12 @@ class Agent:
             agentTools = await self.agentAdapter.getOpenAiToolSchema()
             availableTools.extend(agentTools)
         
-        toolIterationCount = 0
-        MAX_TOOL_CYCLES = 10 
         
-        for _ in range(MAX_TOOL_CYCLES):
+        for _ in range(cfg.config.MAX_TOOL_CYCLES):
             try:
-                # Delegate net call to injected client
-                # Client handles retries and rate limits
                 llmResult = await self.llmClient.chatCompletion(
                     self.model, 
-                    interactionHistory, 
+                    self.messageHistory, 
                     tools=availableTools if availableTools else None
                 )
                 
@@ -309,17 +303,45 @@ class Agent:
                 
                 # CASE A: Final Text Response received
                 if not assistantMessage.get("tool_calls"):
-                    researchReportContent = assistantMessage["content"]
-                    logger.info(f"{self.profile.name}: Analysis complete ({len(researchReportContent or '')} chars)")
-                    return researchReportContent or "No content returned."
+                    researchReportContent = assistantMessage.get("content", "").strip()
+                    # Append assistant completion to history
+                    self.messageHistory.append(assistantMessage)
+                    
+                    if not researchReportContent:
+                        logger.warning(f"{self.profile.name}: LLM returned empty content. Retrying...")
+                        continue
+
+                    logger.info(f"{self.profile.name}: Analysis complete ({len(researchReportContent)} chars)")
+                    return researchReportContent
 
                 # CASE B: Tool Calls Requested by LLM
-                toolIterationCount += 1
-                interactionHistory.append(assistantMessage) 
+                self.messageHistory.append(assistantMessage) 
                 
                 for requestedTool in assistantMessage["tool_calls"]:
                     targetToolName = requestedTool["function"]["name"]
-                    toolArguments = json.loads(requestedTool["function"]["arguments"])
+                    rawArguments = requestedTool["function"]["arguments"]
+                    
+                    # Parse tool arguments — feed errors back for self-correction
+                    try:
+                        toolArguments = json.loads(rawArguments)
+                    except (json.JSONDecodeError, TypeError) as parseError:
+                        logger.warning(
+                            f"{self.profile.name}: Malformed tool JSON for {targetToolName}: {parseError}. "
+                            f"Raw: {rawArguments[:200]}. Feeding error back for self-correction."
+                        )
+                        self.messageHistory.append({
+                            "role": "tool",
+                            "tool_call_id": requestedTool["id"],
+                            "name": targetToolName,
+                            "content": (
+                                f"ERROR: Your tool call arguments were not valid JSON. "
+                                f"Parse error: {parseError}. "
+                                f"Your raw output was: {rawArguments[:300]}. "
+                                f"Please re-call this tool with properly formatted JSON arguments "
+                                f"(use double quotes for all keys and string values)."
+                            )
+                        })
+                        continue
                     
                     logger.info(f"{self.profile.name}: LLM suggested tool -> {targetToolName}")
                     
@@ -331,7 +353,7 @@ class Agent:
                     else:
                         executionResult = f"Error: Tool {targetToolName} not found in this agent's bridge context."
                     
-                    interactionHistory.append({
+                    self.messageHistory.append({
                         "role": "tool",
                         "tool_call_id": requestedTool["id"],
                         "name": targetToolName,
@@ -343,6 +365,7 @@ class Agent:
                 raise e
         
         raise RuntimeError(f"{self.profile.name}: Exceeded maximum tool iteration cycles.")
+
 
     async def provideRecursiveAnalysis(self, question: str, originalAnalysis: str) -> str:
         """
@@ -523,250 +546,289 @@ class ResearchOrchestrator:
             mcpProvider, 
             agentAdapter
         )
+
+    def _parseSynthesisResponse(self, response: str) -> Dict[str, Any]:
+        """
+        Parse synthesis agent markdown output using regex to extract targeted requests or completion.
+        """
+        logger.debug(f"Parsing synthesis response: {response[:200]}...")  # First 200 chars
+        # 1. Detect completion signals
+        completionPatterns = [
+            r"\bDone\b",
+            r"\bThere is nothing else needed\b",
+            r"\bI have enough information\b",
+            r"\bready to provide final\b",
+            r"\bno further (research|information|data) needed\b",
+            r"\bsufficient (data|information|context)\b"
+        ]
+        isComplete = any(re.search(p, response, re.IGNORECASE) for p in completionPatterns)
+        
+        if isComplete:
+            logger.info("Synthesis Agent signaled completion ('Done').")
+            return {"status": "complete", "ready_for_final_synthesis": True}
+
+        # 2. Extract targeted requests using section headers
+        # Matches content between '## For Quantitative Agent:' and next '##' or end of string
+        quant_match = re.search(r"## For Quantitative Agent:([\s\S]*?)(?=##|$)", response)
+        qual_match = re.search(r"## For Qualitative Agent:([\s\S]*?)(?=##|$)", response)
+
+        quant_request = quant_match.group(1).strip() if quant_match else ""
+        qual_request = qual_match.group(1).strip() if qual_match else ""
+
+        # If we have any requests, it's an iteration
+        if quant_request or qual_request:
+            logger.info(f"Synthesis Agent requested more info: Quant({len(quant_request)} chars), Qual({len(qual_request)} chars)")
+            return {
+                "status": "requesting_information",
+                "quant_request": quant_request,
+                "qual_request": qual_request
+            }
+        
+        # Fallback: if no specific structure but not complete, treat it as a broad request or error
+        logger.warning(f"Synthesis response was ambiguous (len={len(response)}). Fallback to broad requests.")
+        return {
+            "status": "requesting_information",
+            "quant_request": "Provide a comprehensive quantitative report.",
+            "qual_request": "Provide a comprehensive qualitative report."
+        }
+
+    async def _executeSpecialistIteration(self, quant_request: str, qual_request: str) -> Dict[str, str]:
+        """
+        Executes both specialist agents in parallel with their targeted requests.
+        """
+        # Run in parallel
+        tasks = []
+        if quant_request:
+            tasks.append(self.quantitativeAgent.performResearchTask(quant_request))
+        else:
+            tasks.append(asyncio.sleep(0, result="No request for Quantitative Agent."))
+
+        if qual_request:
+            tasks.append(self.qualitativeAgent.performResearchTask(qual_request))
+        else:
+            tasks.append(asyncio.sleep(0, result="No request for Qualitative Agent."))
+
+        quant_raw, qual_raw = await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Handle potential exceptions during parallel execution
+        if isinstance(quant_raw, Exception):
+            logger.error(f"Quantitative Agent failed: {quant_raw}")
+            quant_raw = f"ERROR: Quantitative Agent failed to respond. {quant_raw}"
+        if isinstance(qual_raw, Exception):
+            logger.error(f"Qualitative Agent failed: {qual_raw}")
+            qual_raw = f"ERROR: Qualitative Agent failed to respond. {qual_raw}"
+
+        # Apply pruning for next synthesis iteration
+        pruned_quant = pruneAgentOutput(quant_raw, agentType="quantitative")
+        pruned_qual = pruneAgentOutput(qual_raw, agentType="qualitative")
+
+        return {
+            "quant_response": pruned_quant,
+            "qual_response": pruned_qual,
+            "quant_raw": quant_raw,
+            "qual_raw": qual_raw
+        }
+
+    def _getUsageSummary(self) -> Dict[str, Any]:
+        """
+        Retrieves cumulative token usage from the monitoring wrapper if available.
+        """
+        try:
+            from monitoring_wrapper import state
+            return {
+                "total_tokens": state.totalTokens,
+                "usage": state.usage.to_dict()
+            }
+        except Exception as e:
+            logger.debug(f"Usage tracking unavailable: {e}")
+            return {"total_tokens": 0, "usage": {}}
     
     async def cleanup(self):
         """Teardown of all active mcp tool providers."""
         for provider in self.toolProviders.values():
             await provider.cleanup()
 
-    async def executeResearchSession(self, investmentQuery: str) -> Dict:
+    async def connectAll(self):
         """
-        Executes the full multi-agent research workflow via modular phase methods.
+        Pre-connects all tool providers in the current task context.
+        This ensures all MCP context managers are entered in the same task
+        that will eventually call cleanup(), preventing task boundary errors.
         """
-        logger.info(f"\n[RESEARCH QUERY] {investmentQuery}\n")
-        
-        try:
-            # Standby verification for tool providers
-            for providerName, provider in self.toolProviders.items():
-                try:
+        logger.info("Pre-connecting all MCP Tool Providers...")
+        for name, provider in self.toolProviders.items():
+            try:
+                if not provider.session:  # Only connect if not already connected
                     await provider.connect()
-                except Exception as connectionErr:
-                    logger.warning(f"Standby failure for Tool Provider [{providerName}]: {connectionErr}")
+                    logger.info(f"  ✓ Connected: {name}")
+            except asyncio.CancelledError:
+                # Connection was cancelled - re-raise to propagate
+                raise
+            except Exception as e:
+                # Log connection errors but continue with other providers
+                logger.error(f"  ✗ Failed to connect {name}: {e}")
+        logger.info("All MCP Tool Providers ready.")
 
-            # Define State Map
-            researchStateMap = {
-                "qualitative": {"analysis": "", "clarification": ""},
-                "quantitative": {"analysis": "", "clarification": ""},
-                "synthesis": {},
-                "momentum": {}
-            }
+    async def executeResearchSession(self, investmentQuery: str) -> Dict[str, Any]:
+        """
+        Main research workflow using the synthesis-driven iterative approach.
+        Leverages persistent agent state to reduce context redundancy.
+        """
+        # 0. Pre-connect all providers in the MAIN task context to avoid anyio task boundary issues
+        await self.connectAll()
 
-            # Phase 1: Parallel Specialized Intelligence Analysis
-            # ------------------------------------------------------------------
-            qualResults, quantResults = await self.phase1_ParallelAnalysis(investmentQuery)
+        # 1. Reset all agent histories for a clean session
+        self.synthesisAgent.resetHistory()
+        self.qualitativeAgent.resetHistory()
+        self.quantitativeAgent.resetHistory()
+        self.momentumAgent.resetHistory()
+
+        logger.info(f"Starting research session: '{investmentQuery}'")
+        
+        # 2. Iteration 0: Synthesis agent analyzes query and requests broad context
+        initialPrompt = cfg.SYNTHESIS_INITIAL_PROMPT_TEMPLATE.format(investmentQuery=investmentQuery)
+        synthesisRaw = await self.synthesisAgent.performResearchTask(initialPrompt)
+        
+        synthesisAction = self._parseSynthesisResponse(synthesisRaw)
+        
+        # Track the sequence of intelligence gathered for reporting
+        intelligenceGaps = []
+        researchCycles = []
+        
+        iteration = 1
+        maxIterations = cfg.config.MAX_SYNTHESIS_ITERATIONS
+        
+        # 3. Research Loop: Specialists gathering and Synthesis refinement
+        while synthesisAction["status"] == "requesting_information" and iteration <= maxIterations:
+            logger.info(f"--- RESEARCH ITERATION {iteration}/{maxIterations} ---")
             
-            # Persist RAW analysis for final report generation
-            researchStateMap["qualitative"]["analysis"] = qualResults.analysis
-            researchStateMap["quantitative"]["analysis"] = quantResults.analysis
+            # Execute specialists (Qual/Quant) in parallel
+            specialistResults = await self._executeSpecialistIteration(
+                synthesisAction.get("quant_request", ""),
+                synthesisAction.get("qual_request", "")
+            )
             
-            # Prune for handoff: Optimize for inter-agent context windows
-            prunedQual = pruneAgentOutput(qualResults.analysis, agentType="qualitative")
-            prunedQuant = pruneAgentOutput(quantResults.analysis, agentType="quantitative")
-
-            if qualResults.error or quantResults.error:
-                 return {"error": f"Phase 1 Failure: Qual({qualResults.error}) Quant({quantResults.error})"}
+            # Record cycle
+            researchCycles.append({
+                "iteration": iteration,
+                "requests": {
+                    "quant": synthesisAction.get("quant_request"),
+                    "qual": synthesisAction.get("qual_request")
+                },
+                "results": {
+                    "quant": specialistResults["quant_response"],
+                    "qual": specialistResults["qual_response"]
+                }
+            })
             
-            await anyio.sleep(self.PHASE_THROTTLE_SECONDS)
+            # 4. Feedback to Synthesis Agent
+            # Since the agent is stateful, we only need to provide the NEW responses
+            iterationFeedback = f"""
+Specialist Responses (Iteration {iteration}):
 
-            # --- Fundamental Research Track ---
-            if self.mode in ["fundamental", "all"]:
-                
-                # Phase 2: Synthesis
-                # ------------------------------------------------------------------
-                initialSynthesis = await self.phase2_Synthesis(prunedQual, prunedQuant)
-                researchStateMap["synthesis"]["initialSynthesis"] = initialSynthesis
-                await anyio.sleep(self.PHASE_THROTTLE_SECONDS)
+## Qualitative Analysis:
+{specialistResults['qual_response']}
 
-                # Phase 3: Clarification
-                # ------------------------------------------------------------------
-                qualClar, quantClar = await self.phase3_Clarification(
-                    prunedQual, 
-                    prunedQuant
-                )
-                researchStateMap["qualitative"]["clarification"] = qualClar
-                researchStateMap["quantitative"]["clarification"] = quantClar
-                
-                await anyio.sleep(self.PHASE_THROTTLE_SECONDS)
+## Quantitative Analysis:
+{specialistResults['quant_response']}
 
-                # Phase 4: Final Consolidation
-                # ------------------------------------------------------------------
-                # Prune clarification findings and initial synthesis for final consolidation
-                prunedQualClar = pruneAgentOutput(qualClar, agentType="qualitative")
-                prunedQuantClar = pruneAgentOutput(quantClar, agentType="quantitative")
-                prunedSynthesis = pruneAgentOutput(initialSynthesis, agentType="synthesis")
-
-                finalThesis = await self.phase4_Consolidation(
-                    prunedSynthesis, 
-                    prunedQualClar, 
-                    prunedQuantClar,
-                    qualAnalysis=prunedQual,
-                    quantAnalysis=prunedQuant
-                )
-                researchStateMap["synthesis"]["finalRecommendation"] = finalThesis
-
-            # --- Momentum Strategy Track ---
-            if self.mode in ["momentum", "all"]:
-                # Use pruned intelligence to minimize momentum context pressure
-                momentumThesis = await self.phase_MomentumStyling(
-                    prunedQual,
-                    prunedQuant,
-                    researchStateMap["qualitative"]["clarification"] if self.mode == "momentum" else prunedQualClar,
-                    researchStateMap["quantitative"]["clarification"] if self.mode == "momentum" else prunedQuantClar
-                )
-                researchStateMap["momentum"]["analysis"] = momentumThesis
-
-            # Final Session Output
-            sessionResult = {
-                "query": investmentQuery,
-                "timestamp": datetime.now().isoformat(),
-                "mode": self.mode,
-                "agents": researchStateMap
-            }
+---
+Evaluate these results. If significant gaps remain, request targeted follow-ups (Iterations left: {maxIterations - iteration}). 
+If you have enough information for a final thesis, simply output "Done".
+"""
+            synthesisRaw = await self.synthesisAgent.performResearchTask(iterationFeedback)
+            synthesisAction = self._parseSynthesisResponse(synthesisRaw)
             
-            # Export Final Markdown Artifact
-            self.exportResearchReport(sessionResult)
-            return sessionResult
+            iteration += 1
 
-        except Exception as exc:
-            logger.error(f"Research Session failed: {exc}", exc_info=True)
-            return {"error": str(exc)}
-        finally:
-            await self.cleanup()
-
-    # --- Modular Phase Methods ---
-
-    async def phase1_ParallelAnalysis(self, query: str) -> (ResearchResult, ResearchResult):
-        """Execute Phase 1: Parallel Specialized Intelligence (Qual/Quant)."""
-        logger.info("PHASE 1: Execution started (Qual/Quant agents)...")
-        intelligenceSnapshots = {}
+        # 5. Final Synthesis Phase
+        finalReport = ""
+        if self.mode in ["fundamental", "all"]:
+            finalReport = await self.phase_FundamentalFinalization(investmentQuery)
         
-        async with anyio.create_task_group() as taskGroup:
-            async def _runQualitativeBranch():
-                intelligenceSnapshots['qual'] = await self._executeAgentTaskWithSafety(self.qualitativeAgent, query)
-            async def _runQuantitativeBranch():
-                intelligenceSnapshots['quant'] = await self._executeAgentTaskWithSafety(self.quantitativeAgent, query)
-            
-            taskGroup.start_soon(_runQualitativeBranch)
-            taskGroup.start_soon(_runQuantitativeBranch)
-            
-        return intelligenceSnapshots['qual'], intelligenceSnapshots['quant']
+        momentumAnalysis = ""
+        if self.mode in ["momentum", "all"]:
+            momentumAnalysis = await self.phase_MomentumFinalization(investmentQuery)
 
-    async def phase2_Synthesis(self, qualAnalysis: str, quantAnalysis: str) -> str:
-        """Execute Phase 2: Initial Intelligence Synthesis."""
-        logger.info(f"PHASE 2: Collaborative analysis initiated...")
-        synthesisInput = cfg.SYNTHESIS_INPUT_TEMPLATE.format(
-            qualAnalysis=qualAnalysis,
-            quantAnalysis=quantAnalysis
-        )
-        return await self.synthesisAgent.performResearchTask(synthesisInput)
+        # Final Session Output
+        sessionResult = {
+            "query": investmentQuery,
+            "timestamp": datetime.now().isoformat(),
+            "mode": self.mode,
+            "agents": {
+                "research_cycles": researchCycles,
+                "synthesis": {"finalRecommendation": finalReport},
+                "momentum": {"analysis": momentumAnalysis}
+            },
+            "usage": self._getUsageSummary()
+        }
+        
+        # Export Final Markdown Artifact
+        self.exportResearchReport(sessionResult)
+        return sessionResult
 
-    async def phase3_Clarification(self, qualAnalysis: str, quantAnalysis: str) -> (str, str):
-        """Execute Phase 3: Recursive Cross-Verification."""
-        logger.info("PHASE 3 (Fundamental): Initiating recursive cross-verification...")
-        qualTask = self.qualitativeAgent.provideRecursiveAnalysis(cfg.QUAL_RECURSIVE_QUESTION, qualAnalysis)
-        quantTask = self.quantitativeAgent.provideRecursiveAnalysis(cfg.QUANT_RECURSIVE_QUESTION, quantAnalysis)
+    async def phase_FundamentalFinalization(self, query: str) -> str:
+        """
+        Triggers final synthesis Mode 3 after research iterations are complete.
+        Leverages synthesis agent's persistent history.
+        """
+        logger.info("Finalizing Fundamental Analysis (Mode 3 Synthesis)")
         
-        results = await asyncio.gather(qualTask, quantTask)
-        return results[0], results[1]
+        finalPrompt = cfg.SYNTHESIS_FINAL_THESIS_TEMPLATE.format(investmentQuery=query)
+        return await self.synthesisAgent.performResearchTask(finalPrompt)
 
-    def _prepareIntelligenceContext(
-        self, 
-        qualAnalysis: str = "N/A", 
-        quantAnalysis: str = "N/A", 
-        qualClar: str = "N/A", 
-        quantClar: str = "N/A", 
-        initialSynthesis: str = "N/A"
-    ) -> str:
-        """Helper to consolidate various intelligence strands into a single prompt context."""
-        return cfg.AGENTS_INFORMATION_CONTEXT_TEMPLATE.format(
-            qualAnalysis=qualAnalysis or "N/A",
-            quantAnalysis=quantAnalysis or "N/A",
-            qualClarification=qualClar or "N/A",
-            quantClarification=quantClar or "N/A",
-            initialSynthesis=initialSynthesis or "N/A"
-        )
+    async def phase_MomentumFinalization(self, query: str) -> str:
+        """
+        Triggers momentum finalization. 
+        Note: Momentum agent currently leverages context via synthesis results if needed.
+        """
+        logger.info(f"Finalizing Momentum Analysis for '{query}'")
         
-    async def phase4_Consolidation(
-        self, 
-        initialSynthesis: str, 
-        qualClarification: str, 
-        quantClarification: str,
-        qualAnalysis: str = "N/A",
-        quantAnalysis: str = "N/A"
-    ) -> str:
-        """Execute Phase 4: Final Investment Thesis Consolidation."""
-        logger.info("PHASE 4 (Fundamental): Finalizing unified investment thesis...")
-        
-        consolidationInput = self._prepareIntelligenceContext(
-            qualAnalysis=qualAnalysis,
-            quantAnalysis=quantAnalysis,
-            qualClar=qualClarification,
-            quantClar=quantClarification,
-            initialSynthesis=initialSynthesis
-        )
-        
-        return await self.synthesisAgent.performResearchTask(consolidationInput)
+        # Momentum agent performs its specialized styling/analysis on its persistent context
+        return await self.momentumAgent.performResearchTask(f"Finalize momentum thesis for: {query}")
 
-    async def phase_MomentumStyling(
-        self, 
-        qualAnalysis: str, 
-        quantAnalysis: str, 
-        qualClar: str, 
-        quantClar: str
-    ) -> str:
-        """Execute Momentum Analysis Phase using consolidated intelligence."""
-        logger.info("PHASE 2b (Momentum): Generating reactive swing trade profile...")
-        
-        momentumInput = self._prepareIntelligenceContext(
-            qualAnalysis=qualAnalysis,
-            quantAnalysis=quantAnalysis,
-            qualClar=qualClar,
-            quantClar=quantClar,
-            initialSynthesis="N/A" # Momentum agent does not consume initial synthesis typically
-        )
-        
-        return await self.momentumAgent.performResearchTask(momentumInput)
-
+    # --- Utility Methods ---
 
     async def _runAgentTask(self, agent: Agent, task: str) -> str:
-        """Raw agent task execution, serving as a clean entry point for unit tests."""
+        """Raw agent task execution."""
         return await agent.performResearchTask(task)
-
-    async def _executeAgentTaskWithSafety(self, agent: Agent, task: str) -> ResearchResult:
-        """Shielded agent execution with persistent error handling and structured result wrapping."""
-        try:
-            analysisOutput = await self._runAgentTask(agent, task)
-            return ResearchResult(agent.profile.name, analysisOutput, datetime.now())
-        except Exception as invocationError:
-            logger.error(f"Agent [{agent.profile.name}] execution fault: {invocationError}")
-            return ResearchResult(agent.profile.name, "", datetime.now(), str(invocationError))
 
     def exportResearchReport(self, result: Dict):
         """Generates and writes a formatted markdown report based on the research results."""
         creationTime = datetime.now().strftime("%Y%m%d_%H%M%S")
         outputFilepath = self.outputDir / f"research_{result['mode']}_{creationTime}.md"
         
+        # Consolidate all iteration findings for the report
+        cycles = result['agents'].get('research_cycles', [])
+        allQual = "\n\n".join([f"### Iteration {h['iteration']}\n{h['results']['qual']}" for h in cycles])
+        allQuant = "\n\n".join([f"### Iteration {h['iteration']}\n{h['results']['quant']}" for h in cycles])
+
         # Format core intelligence sections
-        compositeReport = cfg.MARKDOWN_REPORT_TEMPLATE.format(
-            query=result['query'],
-            qualAnalysis=result['agents']['qualitative']['analysis'],
-            qualClarification=result['agents']['qualitative']['clarification'],
-            quantAnalysis=result['agents']['quantitative']['analysis'],
-            quantClarification=result['agents']['quantitative']['clarification'],
-            finalRecommendation=result['agents'].get('synthesis', {}).get('finalRecommendation', 'N/A (Momentum-only Mode)')
-        )
+        compositeReport = f"# Investment Research Report: {result['query']}\n\n"
+        compositeReport += f"**Timestamp**: {result['timestamp']}\n"
+        compositeReport += f"**Strategy Mode**: {result['mode']}\n\n"
         
-        # Inject Momentum Insights if applicable
+        compositeReport += "## Qualitative Intelligence Cycle\n"
+        compositeReport += allQual + "\n\n"
+        
+        compositeReport += "## Quantitative Data Cycle\n"
+        compositeReport += allQuant + "\n\n"
+        
+        if result['mode'] in ['fundamental', 'all']:
+            compositeReport += "## Final Investment Thesis\n"
+            compositeReport += result['agents'].get('synthesis', {}).get('finalRecommendation', 'N/A') + "\n\n"
+            
         if result['mode'] in ['momentum', 'all']:
-            momentumIntelligence = cfg.MOMENTUM_REPORT_SECTION.format(
-                momentumAnalysis=result['agents']['momentum']['analysis']
-            )
-            compositeReport += momentumIntelligence
+            compositeReport += "## Momentum Strategy Analysis\n"
+            compositeReport += result['agents'].get('momentum', {}).get('analysis', 'N/A') + "\n\n"
+        
+        usage = result.get("usage", {})
+        if usage and usage.get("total_tokens"):
+            compositeReport += "---\n### Resource Usage\n"
+            compositeReport += f"Total Tokens: {usage['total_tokens']}\n"
         
         with open(outputFilepath, 'w', encoding='utf-8') as artifact:
             artifact.write(compositeReport)
         logger.info(f"Research artifact exported to {outputFilepath}")
-
 
 async def main():
     try:
@@ -787,14 +849,33 @@ async def main():
     selectedStrategy = strategyMap.get(strategyInput, "all")
     
     orchestrator = ResearchOrchestrator(mode=selectedStrategy)
-    sessionData = await orchestrator.executeResearchSession(query)
     
-    if "error" not in sessionData:
-        print("\n=== INVESTIGATION COMPLETE ===")
-        print(f"Strategy: {sessionData['mode']} | Artifact: output/research_...")
-    else:
-        print(f"\nInvestigation Fault: {sessionData['error']}")
+    try:
+        sessionData = await orchestrator.executeResearchSession(query)
+        
+        if "error" not in sessionData:
+            print("\n=== INVESTIGATION COMPLETE ===")
+            print(f"Strategy: {sessionData['mode']} | Artifact: output/research_...")
+        else:
+            print(f"\nInvestigation Fault: {sessionData['error']}")
+
+    finally:
+        # Explicit cleanup in the same async context
+        logger.info("Cleaning up orchestrator resources...")
+        try:
+            await orchestrator.cleanup()
+        except asyncio.CancelledError:
+            logger.debug("Cleanup cancelled during shutdown")
+        except Exception as e:
+            logger.debug(f"Cleanup error: {e}")
+        
+        # Give Docker containers time to terminate gracefully
+        try:
+            await asyncio.sleep(0.5)
+        except asyncio.CancelledError:
+            pass  # Sleep was cancelled - that's fine, we're shutting down anyway
+
 
 if __name__ == "__main__":
-    anyio.run(main)
+    asyncio.run(main())
 
