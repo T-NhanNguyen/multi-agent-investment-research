@@ -3,15 +3,13 @@
 # ABOUTME: totalTokens is DERIVED from per-agent buckets — single source of truth.
 
 import json
-import asyncio
 import logging
-import httpx
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Union
 import functools
 from contextvars import ContextVar
-from dataclasses import dataclass, asdict, field
+from dataclasses import dataclass, asdict
 
 try:
     from multi_agent_investment import ResearchOrchestrator
@@ -253,73 +251,48 @@ def patch_multi_agent():
                 state.agents[name]["currentTask"] = query
                 state.agents[name]["progress"] = 25
             
-            originalPost = httpx.AsyncClient.post
-            
-            async def _wrappedPost(clientSelf, url, **kwargs):
-                response = await originalPost(clientSelf, url, **kwargs)
-                if response.is_success:
-                    try:
-                        data = response.json()
-                        usage = data.get("usage", {})
-                        if usage:
-                            p_tokens = usage.get("prompt_tokens", 0)
-                            c_tokens = usage.get("completion_tokens", 0)
-                            total = usage.get("total_tokens", p_tokens + c_tokens)
-                            
-                            if total > 0:
-                                # Extract granular metrics
-                                cached = usage.get("prompt_tokens_details", {}).get("cached_tokens", 0)
-                                reasoning = usage.get("completion_tokens_details", {}).get("reasoning_tokens", 0)
-                                cost = usage.get("cost", 0.0)
-
-                                current_usage = TokenUsage(
-                                    prompt_tokens=p_tokens,
-                                    completion_tokens=c_tokens,
-                                    total_tokens=total,
-                                    cached_tokens=cached,
-                                    reasoning_tokens=reasoning,
-                                    cost=cost
-                                )
-
-                                if name and name in state.agents:
-                                    state.agents[name]["usage"].add(current_usage)
-                                else:
-                                    # Route unattributed tokens to orchestrator bucket
-                                    if "_orchestrator" not in state.agents:
-                                        state.agents["_orchestrator"] = {
-                                            "id": "orchestrator",
-                                            "name": "Orchestrator",
-                                            "role": "Synthesis",
-                                            "status": "active",
-                                            "progress": 0,
-                                            "usage": TokenUsage(),
-                                            "toolCallsCount": 0,
-                                            "currentTask": "System orchestration"
-                                        }
-                                    state.agents["_orchestrator"]["usage"].add(current_usage)
-                                    logger.warning(f"Unattributed tokens ({total}) assigned to Orchestrator (agent name: {name})")
-                            
-                        # Capture thoughts/activity
-                        choices = data.get("choices", [])
-                        if choices:
-                            content = choices[0].get("message", {}).get("content")
-                            if content:
-                                state.toolCalls.append({
-                                    "id": f"thought_{datetime.now().strftime('%H%M%S%f')}",
-                                    "toolName": "THOUGHT",
-                                    "agentName": name,
-                                    "arguments": {"thought": content[:500] + ("..." if len(content) > 500 else "")},
-                                    "timestamp": datetime.now().isoformat(),
-                                    "executionTimeMs": 0
-                                })
-                    except:
-                        pass
-                return response
-
-            httpx.AsyncClient.post = _wrappedPost
-            
             try:
                 result = await originalAnalyze(self, query)
+
+                # Read usage directly from the structured ChatResponse —
+                # provider-agnostic and guaranteed consistent by _normalizeUsage in llm_client.
+                if self.lastResponse and self.lastResponse.usage:
+                    usage = self.lastResponse.usage
+                    current_usage = TokenUsage(
+                        prompt_tokens=usage.get("prompt_tokens", 0),
+                        completion_tokens=usage.get("completion_tokens", 0),
+                        total_tokens=usage.get("total_tokens", 0),
+                    )
+                    if name in state.agents:
+                        state.agents[name]["usage"].add(current_usage)
+                    else:
+                        # Route unattributed tokens to orchestrator bucket
+                        if "_orchestrator" not in state.agents:
+                            state.agents["_orchestrator"] = {
+                                "id": "orchestrator",
+                                "name": "Orchestrator",
+                                "role": "Synthesis",
+                                "status": "active",
+                                "progress": 0,
+                                "usage": TokenUsage(),
+                                "toolCallsCount": 0,
+                                "currentTask": "System orchestration"
+                            }
+                        state.agents["_orchestrator"]["usage"].add(current_usage)
+                        logger.warning(f"Unattributed tokens ({current_usage.total_tokens}) assigned to Orchestrator (agent: {name})")
+
+                # Capture last thought/content for activity feed
+                if self.lastResponse and self.lastResponse.content:
+                    content = self.lastResponse.content
+                    state.toolCalls.append({
+                        "id": f"thought_{datetime.now().strftime('%H%M%S%f')}",
+                        "toolName": "THOUGHT",
+                        "agentName": name,
+                        "arguments": {"thought": content[:500] + ("..." if len(content) > 500 else "")},
+                        "timestamp": datetime.now().isoformat(),
+                        "executionTimeMs": 0
+                    })
+
                 if name in state.agents:
                     state.agents[name]["status"] = "completed"
                     state.agents[name]["progress"] = 100
@@ -331,7 +304,6 @@ def patch_multi_agent():
                     state.agents[name]["currentTask"] = f"Error: {str(e)}"
                 raise
             finally:
-                httpx.AsyncClient.post = originalPost
                 currentAgent.reset(token)
 
         Agent.performResearchTask = _wrappedAnalyze

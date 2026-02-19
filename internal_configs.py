@@ -13,6 +13,7 @@ class AppConfig:
     """Core operational parameters and environment-backed configurations"""
     # API Credentials
     OPENROUTER_API_KEY: str = os.getenv("OPENROUTER_API_KEY", "").strip()
+    OPENAI_API_KEY: str = OPENROUTER_API_KEY
     
     # Model Selection
     PRIMARY_MODEL: str = os.getenv("MODEL_NAME", "z-ai/glm-4.5-air:free")
@@ -43,6 +44,7 @@ class AppConfig:
     OPENROUTER_BASE_URL: str = "https://openrouter.ai/api/v1"
     OPENROUTER_CHAT_ENDPOINT: str = f"{OPENROUTER_BASE_URL}/chat/completions"
     OPENROUTER_RESPONSES_ENDPOINT: str = f"{OPENROUTER_BASE_URL}/responses"
+    OPENAI_RESPONSES_ENDPOINT: str = "https://api.openai.com/v1/responses"
     
     # Defaults
     DEFAULT_INVESTMENT_QUERY: str = "Analyze Tesla (TSLA)"

@@ -3,16 +3,15 @@
 
 
 import asyncio
-import json
 import logging
 import re
-from typing import Dict, List, Optional, Any, Union
+from typing import Dict, Optional, Any
 from dataclasses import dataclass, field
 from pathlib import Path
 from datetime import datetime
 from output_pruner import pruneAgentOutput
 import internal_configs as cfg
-from llm_client import ILlmClient, getLLMClient
+from llm_client import getLlmClient
 from agent_engine import (
     Agent, 
     McpToolProvider, 
@@ -59,7 +58,7 @@ class ResearchOrchestrator:
         # Initialize Shared LLM Client
         
         # Use OpenRouter for search grounding, but use factory for main logic
-        self.llmClient = getLLMClient(
+        self.llmClient = getLlmClient(
             provider=cfg.config.LLM_PROVIDER,
             model=cfg.config.PRIMARY_MODEL,
             apiKey=self.apiKey,

@@ -5,13 +5,13 @@ import asyncio
 import json
 import logging
 import httpx
-from typing import Dict, List, Optional, Any, Union
+from typing import Dict, List, Optional, Any
 from dataclasses import dataclass
 from contextlib import AsyncExitStack
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from output_pruner import pruneAgentOutput
-from llm_client import ILlmClient
+from llm_client import ILlmClient, ChatResponse
 import internal_configs as cfg
 
 # Configure logging
@@ -238,6 +238,7 @@ class Agent:
         self.mcpProvider = mcpProvider
         self.agentAdapter = agentAdapter
         self.messageHistory: List[Dict[str, Any]] = []
+        self.lastResponse: Optional[ChatResponse] = None
     
     def resetHistory(self):
         """Clears the agent's conversation history for a new research session."""
@@ -276,11 +277,17 @@ class Agent:
                     tools=availableTools if availableTools else None
                 )
                 
-                assistantMessage = llmResult["choices"][0]["message"]
+                # Track the last response for observability
+                self.lastResponse = llmResult
+                
+                # Log the intuitive SDK response summary
+                logger.debug(f"{self.profile.name}: LLM Result Detail:\n{llmResult}")
+                
+                assistantMessage = llmResult.message
                 
                 # CASE A: Final Text Response received
-                if not assistantMessage.get("tool_calls"):
-                    researchReportContent = assistantMessage.get("content", "").strip()
+                if not llmResult.toolCalls:
+                    researchReportContent = llmResult.content.strip()
                     # Append assistant completion to history
                     self.messageHistory.append(assistantMessage)
                     

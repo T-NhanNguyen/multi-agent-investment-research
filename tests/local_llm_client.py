@@ -87,7 +87,7 @@ class LocalLLMClient:
             logger.error(f"[ERROR] {error}. Prompt snippet: {prompt[:500]}...")
             return "", error
 
-def getLLMClient(baseUrl: Optional[str] = None, model: Optional[str] = None) -> LocalLLMClient:
+def getLlmClient(baseUrl: Optional[str] = None, model: Optional[str] = None) -> LocalLLMClient:
     # Factory for general LLM client (entities, summarization, pruning).
     provider = settings.RELATIONSHIP_PROVIDER
     

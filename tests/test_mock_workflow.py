@@ -9,7 +9,16 @@ if project_root not in sys.path:
 
 # Explicitly import from our NEW refactored engine to ensure it's being tested
 from agent_engine import Agent, AgentSpecLoader, AgentProfile
+from llm_client import ChatResponse
 from multi_agent_investment import ResearchOrchestrator
+
+def _mockResponse(content: str) -> ChatResponse:
+    """Helper: build a minimal ChatResponse for mocking chatCompletion."""
+    return ChatResponse(
+        id="mock-id",
+        content=content,
+        usage={"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30}
+    )
 
 class TestAgentEngine(unittest.IsolatedAsyncioTestCase):
     """
@@ -33,14 +42,7 @@ class TestAgentEngine(unittest.IsolatedAsyncioTestCase):
         """
         profile = AgentProfile("Test", ["tools"], ["friendly"], "test", "System Prompt")
         mock_llm = MagicMock()
-        mock_llm.chatCompletion = AsyncMock(return_value={
-            "choices": [{
-                "message": {
-                    "role": "assistant",
-                    "content": "Hello world"
-                }
-            }]
-        })
+        mock_llm.chatCompletion = AsyncMock(return_value=_mockResponse("Hello world"))
 
         agent = Agent(profile, mock_llm)
         
@@ -50,15 +52,19 @@ class TestAgentEngine(unittest.IsolatedAsyncioTestCase):
         # Verify component behavior from agent_engine.py
         self.assertEqual(response, "Hello world")
         # History: [SystemPrompt, UserQuery, AssistantResponse]
-        self.assertEqual(len(agent.messageHistory), 3) 
+        self.assertEqual(len(agent.messageHistory), 3)
         self.assertEqual(agent.messageHistory[0]["role"], "system")
         self.assertEqual(agent.messageHistory[1]["role"], "user")
         self.assertEqual(agent.messageHistory[2]["role"], "assistant")
         
+        # Verify lastResponse is populated correctly
+        self.assertIsNotNone(agent.lastResponse)
+        self.assertEqual(agent.lastResponse.content, "Hello world")
+        
         # 2. Verify history persistence (the core of our agentic state)
         await agent.performResearchTask("Follow up")
         # History: [System, User1, Assist1, User2, Assist2]
-        self.assertEqual(len(agent.messageHistory), 5) 
+        self.assertEqual(len(agent.messageHistory), 5)
 
     async def test_orchestrator_integration(self):
         """
@@ -70,14 +76,14 @@ class TestAgentEngine(unittest.IsolatedAsyncioTestCase):
         
         # Mock responses for: Synthesis Initial -> Quant -> Qual -> Synthesis Final -> Thesis
         mock_llm.chatCompletion.side_effect = [
-            {"choices": [{"message": {"role": "assistant", "content": "## For Quantitative Agent:\nPrice\n## For Qualitative Agent:\nNews"}}]},
-            {"choices": [{"message": {"role": "assistant", "content": "Price is 100"}}]},
-            {"choices": [{"message": {"role": "assistant", "content": "News is good"}}]},
-            {"choices": [{"message": {"role": "assistant", "content": "Done"}}]},
-            {"choices": [{"message": {"role": "assistant", "content": "# Final Thesis\nBuy" }}]}
+            _mockResponse("## For Quantitative Agent:\nPrice\n## For Qualitative Agent:\nNews"),
+            _mockResponse("Price is 100"),
+            _mockResponse("News is good"),
+            _mockResponse("Done"),
+            _mockResponse("# Final Thesis\nBuy"),
         ]
 
-        with patch('multi_agent_investment.getLLMClient', return_value=mock_llm), \
+        with patch('multi_agent_investment.getLlmClient', return_value=mock_llm), \
              patch('agent_engine.McpToolProvider.connect', new_callable=AsyncMock), \
              patch('agent_engine.McpToolProvider.cleanup', new_callable=AsyncMock):
             
