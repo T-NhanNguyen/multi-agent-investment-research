@@ -62,7 +62,7 @@ class ResearchOrchestrator:
             provider=cfg.config.LLM_PROVIDER,
             model=cfg.config.PRIMARY_MODEL,
             apiKey=self.apiKey,
-            baseUrl=cfg.config.LOCAL_LLM_URL if cfg.config.LLM_PROVIDER == "local" else cfg.config.OPENROUTER_CHAT_ENDPOINT,
+            baseUrl=None, 
             backoffCap=cfg.config.RATE_LIMIT_BACKOFF_CAP
         )
         

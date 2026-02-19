@@ -44,7 +44,7 @@ class AppConfig:
     OPENROUTER_BASE_URL: str = "https://openrouter.ai/api/v1"
     OPENROUTER_CHAT_ENDPOINT: str = f"{OPENROUTER_BASE_URL}/chat/completions"
     OPENROUTER_RESPONSES_ENDPOINT: str = f"{OPENROUTER_BASE_URL}/responses"
-    OPENAI_RESPONSES_ENDPOINT: str = "https://api.openai.com/v1/responses"
+    OPENAI_CHAT_ENDPOINT: str = "https://api.openai.com/v1"
     
     # Defaults
     DEFAULT_INVESTMENT_QUERY: str = "Analyze Tesla (TSLA)"

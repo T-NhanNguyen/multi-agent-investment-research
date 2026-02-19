@@ -22,6 +22,21 @@ A sophisticated coordination system for automated investment research. It levera
 - **Stateful Context management**: Agents now maintain an in-memory `messageHistory` throughout a research session. This eliminates the need for the orchestrator to repeat the full conversation history in every turn.
 - **Deterministic Shutdown & Task Safety**: Resolved critical `anyio` task boundary violations during MCP cleanup. Implemented a `connectAll()` pre-connection protocol in the main orchestrator task.
 - **Resilient Content Recovery**: The `Agent` class now implements an **Active Retry** mechanism for empty LLM responses. This prevents premature session termination due to transient provider failures or extreme context-length pressure.
+- **Decoupled Stability Controls**: Introduced `MAX_TOOL_CYCLES` (15) to ensure agents have sufficient "breathing room" for complex internal research tasks (ticker resolution, etc.), independent of broader request retries.
+
+## Recent Progress & Milestones (v1.2)
+
+- **Agentic Tool Call Self-Correction**: Implemented a robust loop for handling malformed LLM tool arguments. If an agent produces invalid JSON, the system feeds the parse error back into the conversation history, allowing the LLM to autonomously correct its output without human intervention.
+- **Deterministic Token Accounting**: Redesigned the monitoring architecture to utilize OpenRouter's native `prompt_tokens` and `completion_tokens` receipts. The system now tracks consumption per-phase, ensuring $100\%$ accuracy in production billing metrics.
+- **Precision Test Metrics**: Integrated `tiktoken` into the `MockTokenTrackingLLM` within `tests/test_output_pruning.py`. This replaces character-length heuristics with deterministic token counts, validating that the pruning system achieves **>50% reduction** in input context overhead.
+- **Improved Monitoring Observability**: The `MonitoringState` now captures `pruning_events` and utilizes downstream consumption multipliers to estimate real-world token savings across compounding research phases.
+
+## Recent Progress & Milestones (v1.1)
+
+- **Local LLM Runner Integration**: Added support for local inference via `LocalLlmClient`. The system can now seamlessly switch between OpenRouter and local OpenAI-compatible APIs (Ollama, Docker Model Runner) for cost-efficient development and testing.
+- **Modular Phase Architecture**: The orchestration logic has been refactored into distinct, testable phases (`Analysis`, `Synthesis`, `Clarification`, `Consolidation`). This enables deterministic testing of individual reasoning steps.
+- **Unified Test Configuration**: Centralized test-time parameters in `tests/test_model_config.py`, providing a single source of truth for mock data, tool images, and LLM endpoints.
+- **Enhanced Integration Testing**: Implemented `tests/test_mock_workflow.py` which executes a full research cycle using a local LLM and real MCP tool bridges, verifying the "Bridge to Local Data" pattern end-to-end.
 
 ## Architecture
 
@@ -38,13 +53,40 @@ The system follows a modular, agentic design pattern:
   - `monitoring_wrapper.py`: Non-invasively instruments the system by reading `agent.lastResponse`. It tracks per-phase token consumption and logs activity for the UI.
   - `api_server.py`: A FastAPI instance providing a real-time status endpoint (`/api/status`).
 
+## Configuration Management
+
+`internal_configs.py` is the centralized "Command Center" for the system. While security-sensitive keys are loaded from `.env`, all logic for provider routing and endpoint mapping resides here.
+
+### Provider/Model/Endpoint Mapping
+
+To change your preferences, update the following in `internal_configs.py`:
+
+- **Change Provider**: Update `LLM_PROVIDER` (Line 22).
+  - Set to `"openai"` to use the SDK path.
+  - Set to `"openrouter"` to use the raw HTTP path.
+  - Set to `"local"` for local model runners.
+- **Change Model**: Update `PRIMARY_MODEL` (Line 19). This is passed directly to the active provider.
+- **Change Endpoints**:
+  - For local: Update `LOCAL_LLM_URL` (Line 23).
+  - For production: Update `OPENROUTER_BASE_URL` or `OPENAI_CHAT_ENDPOINT`.
+
+### How it works with `getLlmClient`
+
+The `ResearchOrchestrator` uses the `getLlmClient` factory (from `llm_client.py`) to initialize the agent's brains. This factory is **URL-conscious**:
+
+1. It reads the `provider` type and maps it to the correct implementation class.
+2. It automatically **normalizes URLs** (e.g., stripping or appending `/chat/completions`) so that the user never has to worry about the specific endpoint requirements of each SDK or provider.
+3. This decoupling allows the orchestrator to remain "blind" to the underlying transport while `internal_configs.py` provides the high-level routing instructions.
+
+For a deeper dive into running local models, see [local_llm_guide.md](./local_llm_guide.md).
+
 ## Setup and Development
 
 ### Prerequisites
 
-- **Docker Desktop**: Required for MCP tool containers and `docker.sock` access.
-- **OpenRouter API Key**: Set in `.env`.
-- **Local LLM Runner**: (Optional) Ollama or Docker Model Runner on `host.docker.internal:12434`.
+- **Docker Desktop**: Required to host the MCP tool containers and ensure sibling-container networking (via `docker.sock`).
+- **OpenRouter API Key**: Set in `.env` for production research.
+- **Local LLM Runner**: (Optional) Ollama or Docker Model Runner on `host.docker.internal:12434` for testing.
 
 ### Installation
 
@@ -79,6 +121,32 @@ The project adheres to **Test-Driven Development (TDD)**:
 
 - **Bridge to Local Data**: Tools like GraphRAG are executed via Docker with volume mounts, ensuring parity between agent and developer environments.
 - **Sustainable Engineering**: Every file starts with `ABOUTME` headers. Specification is the contract between human intent and AI implementation.
+
+## Output Pruning Middleware
+
+`output_pruner.py` reduces inter-agent token usage by stripping noise from LLM outputs before they are passed to downstream agents. Pruning is applied at **orchestration boundaries only** — each agent produces its full output, and the orchestrator decides what to forward.
+
+**What gets stripped:**
+
+- Thinking preambles (`"I'll conduct..."`, `"Let me check..."`)
+- Internal workflow headers (`"## Phase 1:"`, `"## Step 1:"`)
+- Standalone separator lines (`---`)
+
+**What is preserved:**
+
+- All data points, metrics, conclusions, and named entities
+- Lines > 200 chars (safety heuristic against false-positive stripping)
+- Raw outputs in `researchStateMap` for final report generation
+
+**Integration points** in `multi_agent_investment.py`:
+
+- Phase 1 → Phase 2 (Synthesis)
+- Phase 1 → Phase 3 (Clarification)
+- Phase 2/3 → Phase 4 (Consolidation)
+- Recursive `provideRecursiveAnalysis` calls
+
+**Verification:**
+The system is verified via `tests/test_output_pruning.py`, which performs a deterministic A/B comparison (RAW vs PRUNED) using `tiktoken`. It consistently demonstrates a **>50% token reduction** in context-heavy multi-agent workflows.
 
 ## Project Structure
 
