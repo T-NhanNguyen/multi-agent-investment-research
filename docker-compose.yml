@@ -34,3 +34,13 @@ services:
       - E:/ai-workspace/projects/graphRAG-LlamaIndex/.env:/app/graphrag.env
       - /var/run/docker.sock:/var/run/docker.sock
     restart: always
+
+  crawl4ai:
+    image: unclecode/crawl4ai:basic-amd64
+    container_name: crawl4ai
+    ports:
+      - "11235:11235"
+    shm_size: '2gb'
+    environment:
+      - CRAWL4AI_API_TOKEN=research_token_2026
+    restart: always

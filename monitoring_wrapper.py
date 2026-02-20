@@ -1,5 +1,5 @@
-# ABOUTME: Monitoring state and wrapper logic for multi-agent system.
-# ABOUTME: Intercepts core business logic to provide real-time updates for PipelineMonitor.
+# ABOUTME: Monitoring state and aspect-oriented logging for the multi-agent system.
+# ABOUTME: Intercepts core business logic to provide real-time visibility into agent activity.
 # ABOUTME: totalTokens is DERIVED from per-agent buckets — single source of truth.
 
 import json

@@ -2,6 +2,20 @@
 
 A sophisticated coordination system for automated investment research. It leverages a multi-agent, synthesis-driven iterative architecture to provide high-conviction investment theses using stateful LLM agents and the Model Context Protocol (MCP).
 
+## Recent Progress & Milestones (v1.6)
+
+- **Finviz Scraper Integration**: Implemented `finviz_scraper.py` using **Crawl4AI v0.8**. The system now fetches high-fidelity market data and stock profiles directly into the Quantitative Agent's context.
+- **Async Crawl Orchestration**: Adapted to the new v0.8 async task-queue model with a deterministic polling and backoff mechanism for robust data extraction.
+- **Authenticated Service Bridge**: Implemented `Bearer` token authentication and internal Docker networking for the Crawl4AI service, ensuring secure and low-latency communication between research agents and the scraper.
+
+## Web Scraping Implementation Findings
+
+The integration of `crawl4ai` yielded several critical architectural insights:
+
+1. **Async Task Queue (v0.8 API)**: Unlike previous synchronous versions, Crawl4AI v0.8 uses an asynchronous model where `/crawl` returns a `task_id` immediately. The orchestrator must poll `/task/{task_id}` until completion. The `FinvizScraper` implements this via a persistent `httpx` session with a backoff polling loop.
+2. **Configuration Surface Area**: Attempting to pass complex `crawler_config` keys (like `wait_for`, `magic_mode`, or `remove_overlay_elements`) caused silent failures in headless environments. The most resilient pattern is providing a plain `{}` config, allowing the service's internal defaults to optimize the extraction.
+3. **Internal Container Networking**: By standardizing on the Docker Compose service name (`http://crawl4ai:11235`) in `.env`, the system bypasses `host.docker.internal` overhead and resolves directly via the internal bridge network.
+
 ## Recent Progress & Milestones (v1.5)
 
 - **Architecture Hardening**: Decoupled the `monitoring_wrapper` from brittle HTTP monkey-patching. It now exclusively reads structured `lastResponse` data from agents, restoring a clean separation of concerns.
@@ -36,7 +50,8 @@ A sophisticated coordination system for automated investment research. It levera
 - **Local LLM Runner Integration**: Added support for local inference via `LocalLlmClient`. The system can now seamlessly switch between OpenRouter and local OpenAI-compatible APIs (Ollama, Docker Model Runner) for cost-efficient development and testing.
 - **Modular Phase Architecture**: The orchestration logic has been refactored into distinct, testable phases (`Analysis`, `Synthesis`, `Clarification`, `Consolidation`). This enables deterministic testing of individual reasoning steps.
 - **Unified Test Configuration**: Centralized test-time parameters in `tests/test_model_config.py`, providing a single source of truth for mock data, tool images, and LLM endpoints.
-- **Enhanced Integration Testing**: Implemented `tests/test_mock_workflow.py` which executes a full research cycle using a local LLM and real MCP tool bridges, verifying the "Bridge to Local Data" pattern end-to-end.
+- **Enhanced Integration Testing**: Implemented `tests/test_mock_workflow.py` which executes a full research cycle using a local LLM and real MCP tool bridges.
+- **Finviz Intelligence**: Scraper component using `crawl4ai` for deep extraction of market snapshots.
 
 ## Architecture
 

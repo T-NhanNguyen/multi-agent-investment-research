@@ -13,6 +13,7 @@ from mcp.client.stdio import stdio_client
 from output_pruner import pruneAgentOutput
 from llm_client import ILlmClient, ChatResponse
 import internal_configs as cfg
+from finviz_scraper import FinvizScraper
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -219,6 +220,47 @@ class InternalAgentAdapter:
             if not query:
                 return "Error: Missing search query."
             return await self.webAgent.search(query, maxResults)
+        return f"Error: Tool {name} not supported by this adapter."
+
+class FinvizAdapter:
+    """
+    Adapter to expose FinvizScraper as a tool for agents.
+    Complies with the same execution interface as InternalAgentAdapter.
+    """
+    
+    def __init__(self, name: str, scraper: FinvizScraper):
+        self.name = name
+        self.scraper = scraper
+        self.toolsLibrary = cfg.FINVIZ_TOOL_DEFINITION
+
+    async def getOpenAiToolSchema(self) -> List[Dict]:
+        """Convert Finviz tool definitions to OpenAI tool call schema."""
+        toolSchemas = []
+        for tool in self.toolsLibrary.values():
+            toolSchemas.append({
+                "type": "function",
+                "function": {
+                    "name": tool["name"],
+                    "description": tool["description"],
+                    "parameters": tool["inputSchema"]
+                }
+            })
+        return toolSchemas
+
+    async def executeMcpTool(self, name: str, arguments: Dict) -> str:
+        """Route tool call to the FinvizScraper."""
+        if name == "get_finviz_data":
+            ticker = arguments.get("ticker")
+            if not ticker:
+                return "Error: Missing ticker symbol."
+            
+            result = await self.scraper.scrapeTicker(ticker)
+            if result.get("success"):
+                # Return the content directly as it's intended for agent context
+                return result["content"]
+            else:
+                return f"Error scraping Finviz for {ticker}: {result.get('error')}"
+        
         return f"Error: Tool {name} not supported by this adapter."
 
 class Agent:

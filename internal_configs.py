@@ -21,6 +21,8 @@ class AppConfig:
     INTEGRATION_TEST_MODEL: str = os.getenv("INTEGRATION_TEST_MODEL", "z-ai/glm-4.5-air:free")
     LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "openrouter").lower()
     LOCAL_LLM_URL: str = os.getenv("LOCAL_LLM_URL", "http://host.docker.internal:12434").strip()
+    CRAWL4AI_BASE_URL: str = os.getenv("CRAWL4AI_BASE_URL", "http://host.docker.internal:11235").strip()
+    CRAWL4AI_API_TOKEN: str = os.getenv("CRAWL4AI_API_TOKEN", "").strip()
     
     # Operational Parameters
     MAX_RETRIES: int = 3
@@ -49,7 +51,7 @@ class AppConfig:
     # Defaults
     DEFAULT_INVESTMENT_QUERY: str = "Analyze Tesla (TSLA)"
     DEFAULT_RESEARCH_MODE: str = os.getenv("DEFAULT_MODE", "fundamental").strip().lower()
-    RESEARCH_MODES: list = field(default_factory=lambda: ["fundamental", "momentum", "all"])
+    RESEARCH_MODES: list = field(default_factory=lambda: ["fundamental", "momentum", "all", "quick"])
     
     # Synthesis Orchestration
     MAX_SYNTHESIS_ITERATIONS: int = 1
@@ -109,6 +111,23 @@ WEB_SEARCH_TOOL_DEFINITION = {
                 }
             },
             "required": ["query", "search_rationale"]
+        }
+    }
+}
+
+FINVIZ_TOOL_DEFINITION = {
+    "get_finviz_data": {
+        "name": "get_finviz_data",
+        "description": "Fetch high-fidelity financial data and market snapshots from Finviz for a specific ticker.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "ticker": {
+                    "type": "string",
+                    "description": "The stock ticker symbol (e.g., 'AAPL', 'TSLA')"
+                }
+            },
+            "required": ["ticker"]
         }
     }
 }
@@ -194,25 +213,22 @@ Follow the writing style guide and templates in your system prompt (Mode 3) and 
 
 # --- Output Templates ---
 
-MARKDOWN_REPORT_TEMPLATE = """> Prompt: {query}
+# Template for the "Process Log" (Research Audit Trail)
+# This includes the raw iteration cycles and specialist findings
+LOG_REPORT_TEMPLATE = """# Research Process Log: {query}
+> **Timestamp**: {timestamp}
+> **Mode**: {mode}
 
-## Qualitative Analysis
-{qualAnalysis}
+## 1. Intelligence Audit Trail
 
-### Risks
-{qualClarification}
+{cycles}
 
-## Quantitative Analysis
-{quantAnalysis}
-
-### Confidence
-{quantClarification}
-
-## Final Recommendation
-{finalRecommendation}
+---
+## 2. Resource Usage
+{usage}
 """
 
 MOMENTUM_REPORT_SECTION = """
-# Momentum Trade Analysis
+# Momentum Strategy Analysis (Process Output)
 {momentumAnalysis}
 """

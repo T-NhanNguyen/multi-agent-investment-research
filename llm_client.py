@@ -340,10 +340,8 @@ def getLlmClient(
             baseUrl=baseUrl or "http://localhost:11434", # Ollama's default
             model=model
         )
-    """
-    If you are running the system inside Docker, you need host.docker.internal instead of localhost which is defined in the internal_configs.
-    This is done by passing that env variable as parameter.
-    """
+    # If you are running the system inside Docker, you need host.docker.internal instead of localhost which is defined in the internal_configs.
+    # This is done by passing that env variable as parameter.
 
     elif provider == "openai":
         # SDK appends /chat/completions itself — strip it if the caller passed the full endpoint

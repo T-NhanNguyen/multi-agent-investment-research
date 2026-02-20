@@ -17,9 +17,12 @@ from agent_engine import (
     McpToolProvider, 
     WebSearchAgent, 
     InternalAgentAdapter, 
-    AgentSpecLoader
+    AgentSpecLoader,
+    FinvizAdapter
 )
 from mcp import StdioServerParameters
+from monitoring_wrapper import patch_multi_agent
+from finviz_scraper import FinvizScraper
 
 # Environment variables are loaded automatically by internal_configs
 
@@ -77,6 +80,12 @@ class ResearchOrchestrator:
         self.outputDir = Path(outputDirectory)
         self.outputDir.mkdir(exist_ok=True)
         
+        # Initialize specialized subdirectories for clean reporting
+        self.logDir = self.outputDir / "research_logs"
+        self.reportDir = self.outputDir / "human-centric_reports"
+        self.logDir.mkdir(exist_ok=True)
+        self.reportDir.mkdir(exist_ok=True)
+        
         # GraphRAG path validation (required for Docker sibling volume mounts)
         registryPath = cfg.config.GRAPHRAG_REGISTRY_DIR
         projectHomePath = cfg.config.GRAPHRAG_PROJECT_PATH
@@ -116,6 +125,10 @@ class ResearchOrchestrator:
         self.webSearchAgent = WebSearchAgent(self.apiKey, model=webSearchModel)
         self.webSearchAdapter = InternalAgentAdapter("web-search", self.webSearchAgent)
         
+        # Initialize Finviz Scraper and Adapter
+        self.finvizScraper = FinvizScraper()
+        self.finvizAdapter = FinvizAdapter("finviz", self.finvizScraper)
+        
         # Bootstrap qualitative and quantitative intelligence agents
         self.qualitativeAgent = self._initializeAgentFromSpec(
             "qualitative_agent.md", 
@@ -125,7 +138,8 @@ class ResearchOrchestrator:
         
         self.quantitativeAgent = self._initializeAgentFromSpec(
             "quantitative_agent.md", 
-            mcpProvider=self.toolProviders["finance"]
+            mcpProvider=self.toolProviders["finance"],
+            agentAdapter=self.finvizAdapter
         )
         
         self.synthesisAgent = self._initializeAgentFromSpec(
@@ -164,7 +178,6 @@ class ResearchOrchestrator:
         """
         Parse synthesis agent markdown output using regex to extract targeted requests or completion.
         """
-        logger.debug(f"Parsing synthesis response: {response[:200]}...")  # First 200 chars
         # 1. Detect completion signals
         completionPatterns = [
             r"\bDone\b",
@@ -174,11 +187,26 @@ class ResearchOrchestrator:
             r"\bno further (research|information|data) needed\b",
             r"\bsufficient (data|information|context)\b"
         ]
-        isComplete = any(re.search(p, response, re.IGNORECASE) for p in completionPatterns)
+        isComplete = False
+        directAnswer = ""
+        for p in completionPatterns:
+            match = re.search(p, response, re.IGNORECASE)
+            if match:
+                isComplete = True
+                # Capture the original response as well for direct printing
+                # We strip the completion trigger itself to keep it clean
+                directAnswer = response.replace(match.group(0), "").strip()
+                # Remove common synthesis headers if they remain
+                directAnswer = re.sub(r"^##\s*Analysis\s*Status\s*", "", directAnswer, flags=re.IGNORECASE).strip()
+                break
         
         if isComplete:
             logger.info("Synthesis Agent signaled completion ('Done').")
-            return {"status": "complete", "ready_for_final_synthesis": True}
+            return {
+                "status": "complete", 
+                "ready_for_final_synthesis": True,
+                "direct_answer": directAnswer
+            }
 
         # 2. Extract targeted requests using section headers
         # Matches content between '## For Quantitative Agent:' and next '##' or end of string
@@ -244,17 +272,23 @@ class ResearchOrchestrator:
 
     def _getUsageSummary(self) -> Dict[str, Any]:
         """
-        Retrieves cumulative token usage from the monitoring wrapper if available.
+        Retrieves cumulative and per-agent token usage from the monitoring wrapper.
         """
         try:
             from monitoring_wrapper import state
+            agentStats = {}
+            for agentName, agentData in state.agents.items():
+                if "usage" in agentData and agentData["usage"].total_tokens > 0:
+                    agentStats[agentName] = agentData["usage"].to_dict()
+            
             return {
                 "total_tokens": state.totalTokens,
-                "usage": state.usage.to_dict()
+                "usage": state.usage.to_dict(),
+                "agents": agentStats
             }
         except Exception as e:
             logger.debug(f"Usage tracking unavailable: {e}")
-            return {"total_tokens": 0, "usage": {}}
+            return {"total_tokens": 0, "usage": {}, "agents": {}}
     
     async def cleanup(self):
         """Teardown of all active mcp tool providers."""
@@ -303,8 +337,11 @@ class ResearchOrchestrator:
         
         synthesisAction = self._parseSynthesisResponse(synthesisRaw)
         
+        # If quick mode is on, we skip logging/reporting to files
+        if self.mode == 'quick':
+            exportReport = False
+        
         # Track the sequence of intelligence gathered for reporting
-        intelligenceGaps = []
         researchCycles = []
         
         iteration = 1
@@ -336,18 +373,18 @@ class ResearchOrchestrator:
             # 4. Feedback to Synthesis Agent
             # Since the agent is stateful, we only need to provide the NEW responses
             iterationFeedback = f"""
-Specialist Responses (Iteration {iteration}):
+                Specialist Responses (Iteration {iteration}):
 
-## Qualitative Analysis:
-{specialistResults['qual_response']}
+                ## Qualitative Analysis:
+                {specialistResults['qual_response']}
 
-## Quantitative Analysis:
-{specialistResults['quant_response']}
+                ## Quantitative Analysis:
+                {specialistResults['quant_response']}
 
----
-Evaluate these results. If significant gaps remain, request targeted follow-ups (Iterations left: {maxIterations - iteration}). 
-If you have enough information for a final thesis, simply output "Done".
-"""
+                ---
+                Evaluate these results. If significant gaps remain, request targeted follow-ups (Iterations left: {maxIterations - iteration}). 
+                If you have enough information for a final thesis, simply output "Done".
+                """
             synthesisRaw = await self.synthesisAgent.performResearchTask(iterationFeedback)
             synthesisAction = self._parseSynthesisResponse(synthesisRaw)
             
@@ -369,7 +406,10 @@ If you have enough information for a final thesis, simply output "Done".
             "mode": self.mode,
             "agents": {
                 "research_cycles": researchCycles,
-                "synthesis": {"finalRecommendation": finalReport},
+                "synthesis": {
+                    "finalRecommendation": finalReport,
+                    "direct_answer": synthesisAction.get("direct_answer", "")
+                },
                 "momentum": {"analysis": momentumAnalysis}
             },
             "usage": self._getUsageSummary()
@@ -407,44 +447,78 @@ If you have enough information for a final thesis, simply output "Done".
         return await agent.performResearchTask(task)
 
     def exportResearchReport(self, result: Dict):
-        """Generates and writes a formatted markdown report based on the research results."""
+        """
+        Generates and writes two separate reports:
+        1. Human-Centric Report: Clean synthesis output following the Writing Guide.
+        2. Process Log: Transparent audit trail of all agent iterations and specialist results.
+        """
         creationTime = datetime.now().strftime("%Y%m%d_%H%M%S")
-        outputFilepath = self.outputDir / f"research_{result['mode']}_{creationTime}.md"
+        safeQuery = re.sub(r'[^\w\s-]', '', result['query']).replace(' ', '_')[:30]
+        baseName = f"{result['mode']}_{safeQuery}_{creationTime}.md"
         
-        # Consolidate all iteration findings for the report
-        cycles = result['agents'].get('research_cycles', [])
-        allQual = "\n\n".join([f"### Iteration {h['iteration']}\n{h['results']['qual']}" for h in cycles])
-        allQuant = "\n\n".join([f"### Iteration {h['iteration']}\n{h['results']['quant']}" for h in cycles])
+        logPath = self.logDir / baseName
+        reportPath = self.reportDir / baseName
 
-        # Format core intelligence sections
-        compositeReport = f"# Investment Research Report: {result['query']}\n\n"
-        compositeReport += f"**Timestamp**: {result['timestamp']}\n"
-        compositeReport += f"**Strategy Mode**: {result['mode']}\n\n"
-        
-        compositeReport += "## Qualitative Intelligence Cycle\n"
-        compositeReport += allQual + "\n\n"
-        
-        compositeReport += "## Quantitative Data Cycle\n"
-        compositeReport += allQuant + "\n\n"
-        
-        if result['mode'] in ['fundamental', 'all']:
-            compositeReport += "## Final Investment Thesis\n"
-            compositeReport += result['agents'].get('synthesis', {}).get('finalRecommendation', 'N/A') + "\n\n"
-            
-        if result['mode'] in ['momentum', 'all']:
-            compositeReport += "## Momentum Strategy Analysis\n"
-            compositeReport += result['agents'].get('momentum', {}).get('analysis', 'N/A') + "\n\n"
-        
+        # --- 1. Generate Process Log ---
+        cycles = result['agents'].get('research_cycles', [])
+        auditTrail = ""
+        for h in cycles:
+            auditTrail += f"### Iteration {h['iteration']}\n"
+            auditTrail += f"#### Quantitative Agent Request:\n> {h['requests']['quant']}\n\n"
+            auditTrail += f"#### Qualitative Agent Request:\n> {h['requests']['qual']}\n\n"
+            auditTrail += f"#### Quantitative Response:\n{h['results']['quant']}\n\n"
+            auditTrail += f"#### Qualitative Response:\n{h['results']['qual']}\n\n"
+            auditTrail += "---\n\n"
+
         usage = result.get("usage", {})
-        if usage and usage.get("total_tokens"):
-            compositeReport += "---\n### Resource Usage\n"
-            compositeReport += f"Total Tokens: {usage['total_tokens']}\n"
+        usageStr = f"Total Tokens: {usage.get('total_tokens', 0)}"
+
+        processLog = cfg.LOG_REPORT_TEMPLATE.format(
+            query=result['query'],
+            timestamp=result['timestamp'],
+            mode=result['mode'],
+            cycles=auditTrail,
+            usage=usageStr
+        )
         
-        with open(outputFilepath, 'w', encoding='utf-8') as artifact:
-            artifact.write(compositeReport)
-        logger.info(f"Research artifact exported to {outputFilepath}")
+        if result['mode'] in ['momentum', 'all']:
+            momentumOut = result['agents'].get('momentum', {}).get('analysis', 'N/A')
+            processLog += cfg.MOMENTUM_REPORT_SECTION.format(momentumAnalysis=momentumOut)
+
+        # --- 2. Generate Human-Centric Report ---
+        # This is primarily the raw output from the Synthesis Agent (Mode 3)
+        humanReport = result['agents'].get('synthesis', {}).get('finalRecommendation', '')
+        
+        # If finalRecommendation is empty (e.g. Iteration 0 complete), look for direct answer
+        if not humanReport:
+            # Try to grab the last synthesis response before "Done" if it was a direct answer
+            humanReport = result['agents'].get('synthesis', {}).get('direct_answer', '')
+
+        if result['mode'] == 'momentum':
+            humanReport = result['agents'].get('momentum', {}).get('analysis', '')
+        elif result['mode'] == 'all' and result['agents'].get('momentum', {}).get('analysis'):
+            # Only append if the synthesis hasn't already integrated it
+            if "Momentum Strategy Analysis" not in humanReport:
+                humanReport += "\n\n---\n## Momentum Intelligence Addendum\n\n"
+                humanReport += result['agents'].get('momentum', {}).get('analysis', '')
+
+        # Write both files
+        with open(logPath, 'w', encoding='utf-8') as logFile:
+            logFile.write(processLog)
+        
+        with open(reportPath, 'w', encoding='utf-8') as reportFile:
+            reportFile.write(humanReport)
+
+        logger.info(f"Research Audit Log: {logPath}")
+        logger.info(f"Human-Centric Report: {reportPath}")
 
 async def main():
+    # Patch for monitoring when running CLI directly
+    try:
+        patch_multi_agent()
+    except ImportError:
+        pass
+
     try:
         cfg.config.verifyConfiguration()
     except ValueError as e:
@@ -454,22 +528,49 @@ async def main():
     query = input(f"Enter target query [{cfg.config.DEFAULT_INVESTMENT_QUERY}]: ").strip() or cfg.config.DEFAULT_INVESTMENT_QUERY
     
     print("\nSelect Investigation Strategy:")
-    print("1. Fundamental (Long-term strategic synthesis)")
-    print("2. Momentum (Reactive swing setup identification)")
-    print("3. Comprehensive (Full intelligence cycle)")
-    strategyInput = input("Choice [3]: ").strip()
+    print("1. Fundamental Strategy (Comprehensive Research)")
+    print("2. Momentum Strategy (Technical/Flow Focus)")
+    print("3. Hybrid Strategy (All Specialist Agents)")
+    print("0. Quick Strategy (Direct Answer, No Files)")
+    choice = input("\nSelect Strategy [1-3, 0 for Quick]: ").strip()
     
-    strategyMap = {"1": "fundamental", "2": "momentum", "3": "all"}
-    selectedStrategy = strategyMap.get(strategyInput, "all")
+    modeMap = {"1": "fundamental", "2": "momentum", "3": "all", "0": "quick"}
+    mode = modeMap.get(choice, "fundamental")
     
-    orchestrator = ResearchOrchestrator(mode=selectedStrategy)
+    orchestrator = ResearchOrchestrator(mode=mode)
     
     try:
         sessionData = await orchestrator.executeResearchSession(query)
         
         if "error" not in sessionData:
             print("\n=== INVESTIGATION COMPLETE ===")
-            print(f"Strategy: {sessionData['mode']} | Artifact: output/research_...")
+            
+            # Print direct answer if available (for Quick mode or early completion)
+            synthesisData = sessionData.get("agents", {}).get("synthesis", {})
+            directAnswer = synthesisData.get("direct_answer")
+            finalRec = synthesisData.get("finalRecommendation")
+            
+            if directAnswer:
+                print("\n--- DIRECT ANSWER ---")
+                print(directAnswer)
+                print("---------------------\n")
+            
+            if sessionData['mode'] == 'quick':
+                print(f"Strategy: Quick | Response delivered via CLI")
+            else:
+                print(f"Strategy: {sessionData['mode']} | Artifact: output/research_...")
+            
+            # Print Token Statistics
+            usage = sessionData.get("usage", {})
+            if usage and usage.get("total_tokens", 0) > 0:
+                print("\n--- TOKEN CONSUMPTION SUMMARY ---")
+                print(f"Total Tokens: {usage['total_tokens']:,}")
+                
+                if "agents" in usage and usage["agents"]:
+                    print("\nPer-Agent Statistics:")
+                    for agent, stats in usage["agents"].items():
+                        print(f"  - {agent:25} : {stats['total_tokens']:,} tokens")
+                print("---------------------------------\n")
         else:
             print(f"\nInvestigation Fault: {sessionData['error']}")
 
