@@ -13,7 +13,7 @@ from dataclasses import dataclass, asdict
 
 try:
     from multi_agent_investment import ResearchOrchestrator
-    from agent_engine import Agent, McpToolProvider, InternalAgentAdapter
+    from agent_engine import Agent, McpToolProvider, InternalAgentAdapter, FinvizAdapter, CompositeAgentAdapter
     import multi_agent_investment
     HAS_ORCHESTRATOR = True
 except ImportError:
@@ -76,6 +76,7 @@ class MonitoringState:
         self.workflowId = workflowId
         self.query = query
         self.mode = mode
+        self.currentPhase = "Running"
         self.startTime = datetime.now().isoformat()
         self.endTime = None
         self.toolCalls = []
@@ -201,14 +202,24 @@ def patch_multi_agent():
         
         def _wrappedInfo(msg, *args, **kwargs):
             if isinstance(msg, str):
-                if "PHASE 1" in msg:
-                    state.currentPhase = "Phase 1: Parallel Analysis"
-                elif "PHASE 2" in msg:
-                    state.currentPhase = "Phase 2: Synthesis"
-                elif "PHASE 3" in msg:
-                    state.currentPhase = "Phase 3: Clarification"
-                elif "PHASE 4" in msg:
-                    state.currentPhase = "Phase 4: Thesis"
+                if "Starting research session" in msg:
+                    state.currentPhase = "Synthesizing"
+                elif "RESEARCH ITERATION" in msg:
+                    # Extract iteration number from '--- RESEARCH ITERATION N/M ---'
+                    import re
+                    m = re.search(r"ITERATION (\d+)/(\d+)", msg)
+                    if m:
+                        state.currentPhase = f"Iteration {m.group(1)} of {m.group(2)}"
+                    else:
+                        state.currentPhase = "Iterating"
+                elif "Finalizing Fundamental" in msg:
+                    state.currentPhase = "Fundamental Finalization"
+                elif "Finalizing Momentum" in msg:
+                    state.currentPhase = "Momentum Finalization"
+                elif "Pre-connecting all MCP" in msg:
+                    state.currentPhase = "Connecting Tools"
+                elif "All MCP Tool Providers ready" in msg:
+                    state.currentPhase = "Running"
             return originalInfo(msg, *args, **kwargs)
             
         multi_agent_investment.logger.info = _wrappedInfo
@@ -368,6 +379,58 @@ def patch_multi_agent():
         
         InternalAgentAdapter.executeMcpTool = _wrappedAdapterCallTool
         
+        # 3c. Patch FinvizAdapter.executeMcpTool (same tracking for Finviz tool calls)
+        originalFinvizCall = FinvizAdapter.executeMcpTool
+        
+        @functools.wraps(originalFinvizCall)
+        async def _wrappedFinvizCallTool(self, name: str, arguments: Dict):
+            startTime = datetime.now()
+            agentName = currentAgent.get()
+            try:
+                result = await originalFinvizCall(self, name, arguments)
+                duration = (datetime.now() - startTime).total_seconds() * 1000
+                state.toolCalls.append({
+                    "id": f"tc_{datetime.now().strftime('%H%M%S%f')}",
+                    "toolName": name,
+                    "agentName": agentName,
+                    "arguments": arguments,
+                    "timestamp": datetime.now().isoformat(),
+                    "executionTimeMs": int(duration)
+                })
+                if agentName and agentName in state.agents:
+                    state.agents[agentName]["toolCallsCount"] += 1
+                return result
+            except Exception as e:
+                raise
+        
+        FinvizAdapter.executeMcpTool = _wrappedFinvizCallTool
+        
+        # 3d. Patch CompositeAgentAdapter.executeMcpTool (delegates to sub-adapters but track at this level too)
+        originalCompositeCall = CompositeAgentAdapter.executeMcpTool
+        
+        @functools.wraps(originalCompositeCall)
+        async def _wrappedCompositeCallTool(self, name: str, arguments: Dict):
+            startTime = datetime.now()
+            agentName = currentAgent.get()
+            try:
+                result = await originalCompositeCall(self, name, arguments)
+                duration = (datetime.now() - startTime).total_seconds() * 1000
+                state.toolCalls.append({
+                    "id": f"tc_{datetime.now().strftime('%H%M%S%f')}",
+                    "toolName": name,
+                    "agentName": agentName,
+                    "arguments": arguments,
+                    "timestamp": datetime.now().isoformat(),
+                    "executionTimeMs": int(duration)
+                })
+                if agentName and agentName in state.agents:
+                    state.agents[agentName]["toolCallsCount"] += 1
+                return result
+            except Exception as e:
+                raise
+        
+        CompositeAgentAdapter.executeMcpTool = _wrappedCompositeCallTool
+
         # 4. Patch output_pruner.pruneAgentOutput to track savings
         try:
             import output_pruner

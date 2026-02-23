@@ -1,10 +1,14 @@
 from fastapi import FastAPI, BackgroundTasks
+from multi_agent_investment import ResearchOrchestrator
 from fastapi.middleware.cors import CORSMiddleware
 from pathlib import Path
 import os
 import asyncio
+import logging
 import internal_configs as cfg
 from monitoring_wrapper import state, patch_multi_agent, initialize_monitoring
+
+logger = logging.getLogger(__name__)
 
 # ABOUTME: FastAPI server providing polling endpoints for the agent monitoring system.
 # ABOUTME: Bridges the Python multi-agent system with the React frontend.
@@ -50,23 +54,37 @@ async def health():
 @app.post("/api/research")
 async def _startResearch(query: str, mode: str = cfg.config.DEFAULT_RESEARCH_MODE):
     """
-    Trigger research via API (for testing monitoring)
-    In a real scenario, this would import the orchestrator and run it.
+    Trigger research via the monitoring API.
+    The orchestrator is created and connected inside the background task to ensure
+    anyio/MCP context managers run within the same task scope (avoiding task boundary errors).
     """
-    from multi_agent_investment import ResearchOrchestrator
-    
-    orchestrator = ResearchOrchestrator(mode=mode)
-    
-    # Run research in background so API remains responsive
+    # Assign a preliminary workflow ID early so the frontend can track it
+    import uuid
+    workflowId = str(uuid.uuid4())
+    state.workflowId = workflowId
+    state.currentPhase = "Initializing"
+
     async def _runResearch():
+        orchestrator = None
         try:
+            # Instantiate inside the task so MCP context managers are task-local
+            orchestrator = ResearchOrchestrator(mode=mode)
             await orchestrator.executeResearchSession(query)
         except Exception as e:
-            print(f"Research failed: {e}")
-            
-    asyncio.create_task(_runResearch())
-    
-    return {"message": "Research started", "workflowId": state.workflow_id}
+            logger.error(f"Research task failed (workflowId={workflowId}): {e}", exc_info=True)
+            # Surface the error into monitoring state so the UI can reflect it
+            state.currentPhase = "Error"
+        finally:
+            if orchestrator is not None:
+                try:
+                    await orchestrator.cleanup()
+                except Exception as cleanupErr:
+                    logger.debug(f"Orchestrator cleanup error: {cleanupErr}")
+
+    # Use get_event_loop().create_task so the coroutine runs in the server's event loop
+    asyncio.get_event_loop().create_task(_runResearch())
+
+    return {"message": "Research started", "workflowId": workflowId}
 
 @app.get("/api/papers")
 async def _listPapers():

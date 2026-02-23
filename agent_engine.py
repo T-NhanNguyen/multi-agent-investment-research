@@ -231,7 +231,12 @@ class FinvizAdapter:
     def __init__(self, name: str, scraper: FinvizScraper):
         self.name = name
         self.scraper = scraper
-        self.toolsLibrary = cfg.FINVIZ_TOOL_DEFINITION
+        
+        # Combine both tool definitions into the adapter's library
+        self.toolsLibrary = {**cfg.FINVIZ_TOOL_DEFINITION, **cfg.FILTER_FINVIZ_TOOL_DEFINITION}
+        
+        # Internal cache to hold the massive JSON payload per ticker
+        self._cache: Dict[str, Dict] = {}
 
     async def getOpenAiToolSchema(self) -> List[Dict]:
         """Convert Finviz tool definitions to OpenAI tool call schema."""
@@ -248,20 +253,111 @@ class FinvizAdapter:
         return toolSchemas
 
     async def executeMcpTool(self, name: str, arguments: Dict) -> str:
-        """Route tool call to the FinvizScraper."""
-        if name == "get_finviz_data":
-            ticker = arguments.get("ticker")
-            if not ticker:
-                return "Error: Missing ticker symbol."
+        """Route tool call to the FinvizScraper or filter cache."""
+        ticker = arguments.get("ticker", "").upper()
+        if not ticker:
+            return "Error: Missing ticker symbol."
             
+        if name == "get_finviz_data":
             result = await self.scraper.scrapeTicker(ticker)
             if result.get("success"):
-                # Return the content directly as it's intended for agent context
-                return result["content"]
+                data = result.get("data", {})
+                
+                # Cache the full payload
+                self._cache[ticker] = data
+                
+                # Generate a summary manifest instead of returning the 100KB JSON
+                summary = (
+                    f"SUCCESS: Finviz data cached for {ticker}.\n"
+                    f"Available data sizes:\n"
+                    f"- fundamentals: {len(data.get('fundamentals', {}))} items\n"
+                    f"- analyst_ratings: {len(data.get('analyst_ratings', []))} records\n"
+                    f"- recent_headlines: {len(data.get('recent_headlines', []))} articles\n"
+                    f"- insider_trading: {len(data.get('insider_trading', []))} trades\n"
+                    f"- institutional_ownership: {len(data.get('institutional_ownership', []))} entities\n\n"
+                    f"Use `filter_finviz_data` to extract the specific section and date range you need."
+                )
+                return summary
             else:
                 return f"Error scraping Finviz for {ticker}: {result.get('error')}"
-        
+                
+        elif name == "filter_finviz_data":
+            # Check if we have data cached for this ticker
+            if ticker not in self._cache:
+                return f"Error: No cached data for {ticker}. You must run `get_finviz_data` first."
+            
+            data_key = arguments.get("data_key")
+            cached_data = self._cache[ticker]
+            
+            if data_key not in cached_data:
+                return f"Error: '{data_key}' is not a valid section in the Finviz data."
+                
+            payload = cached_data[data_key]
+            
+            # If payload is a list, apply filtering
+            if isinstance(payload, list):
+                start_date = arguments.get("start_date")
+                end_date = arguments.get("end_date")
+                limit = arguments.get("limit", 25)
+                
+                filtered_list = payload
+                
+                # Basic string-matching filter for dates since formats vary (e.g. 'Feb-15-26', 'Today', 'Recent')
+                # If a start_date matches, we keep everything from that item onward (assuming reverse chronological order)
+                if start_date:
+                    found_index = -1
+                    for i, item in enumerate(filtered_list):
+                        item_date = item.get("publish_date") or item.get("date", "")
+                        if start_date.lower() in item_date.lower():
+                            found_index = i
+                            break
+                    if found_index != -1:
+                        # Slice to only include items from the start_date item upwards to the newest
+                        filtered_list = filtered_list[:found_index + 1]
+                
+                if end_date:
+                    found_index = -1
+                    for i, item in enumerate(filtered_list):
+                        item_date = item.get("publish_date") or item.get("date", "")
+                        if end_date.lower() in item_date.lower():
+                            found_index = i
+                            break
+                    if found_index != -1:
+                        # Slice to discard older items below the end_date
+                        filtered_list = filtered_list[found_index:]
+
+                # Apply limit
+                filtered_list = filtered_list[:limit]
+                return json.dumps(filtered_list, indent=2)
+                
+            # If payload is a dict (like fundamentals), just return it
+            return json.dumps(payload, indent=2)
+            
         return f"Error: Tool {name} not supported by this adapter."
+
+class CompositeAgentAdapter:
+    """
+    Combines multiple adapters into a single interface for an agent.
+    Allows an agent to have access to multiple internal specialized tools (e.g. WebSearch + Finviz).
+    """
+    
+    def __init__(self, adapters: List[Any]):
+        self.adapters = adapters
+        self.toolsLibrary = {}
+        for adapter in self.adapters:
+            self.toolsLibrary.update(adapter.toolsLibrary)
+
+    async def getOpenAiToolSchema(self) -> List[Dict]:
+        allSchemas = []
+        for adapter in self.adapters:
+            allSchemas.extend(await adapter.getOpenAiToolSchema())
+        return allSchemas
+
+    async def executeMcpTool(self, name: str, arguments: Dict) -> str:
+        for adapter in self.adapters:
+            if name in adapter.toolsLibrary:
+                return await adapter.executeMcpTool(name, arguments)
+        return f"Error: Tool {name} not found in any registered adapters."
 
 class Agent:
     """Investment research agent with hybrid profile and MCP tool calling capability."""
@@ -272,7 +368,7 @@ class Agent:
         llmClient: ILlmClient,
         model: str = cfg.config.PRIMARY_MODEL,
         mcpProvider: Optional[McpToolProvider] = None,
-        agentAdapter: Optional[InternalAgentAdapter] = None
+        agentAdapter: Optional[Any] = None
     ):
         self.profile = profile
         self.llmClient = llmClient

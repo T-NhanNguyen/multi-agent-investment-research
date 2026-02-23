@@ -17,6 +17,7 @@ class AppConfig:
     
     # Model Selection
     PRIMARY_MODEL: str = os.getenv("MODEL_NAME", "z-ai/glm-4.5-air:free")
+    SYNTHESIS_MODEL: str = os.getenv("SYNTHESIS_MODEL", os.getenv("MODEL_NAME", "deepseek/deepseek-r1-0528:free"))
     WEB_SEARCH_MODEL: str = os.getenv("WEB_SEARCH_MODEL", os.getenv("MODEL_NAME", "z-ai/glm-4.5-air:free"))
     INTEGRATION_TEST_MODEL: str = os.getenv("INTEGRATION_TEST_MODEL", "z-ai/glm-4.5-air:free")
     LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "openrouter").lower()
@@ -33,7 +34,7 @@ class AppConfig:
     
     # Docker & MCP Configuration
     FINANCE_TOOLS_IMAGE: str = os.getenv("FINANCE_TOOLS_IMAGE", "finance-tools-finance-tools")
-    GRAPHRAG_IMAGE: str = "graphrag-llamaindex"
+    GRAPHRAG_IMAGE: str = "graphrag-query"
     GRAPHRAG_NODE_MODULES_VOLUME: str = "graphrag_node_modules"
     GRAPHRAG_DEFAULT_DB: str = "investment-analysis"
     
@@ -41,6 +42,7 @@ class AppConfig:
     GRAPHRAG_REGISTRY_DIR: str = os.getenv("GRAPHRAG_REGISTRY_DIR", "").strip()
     GRAPHRAG_PROJECT_PATH: str = os.getenv("GRAPHRAG_PROJECT_PATH", "").strip()
     GRAPHRAG_DATABASE: str = os.getenv("GRAPHRAG_DATABASE", "investment-analysis").strip()
+    R2_DB_URL: str = os.getenv("R2_DB_URL", "").strip()
     
     # API Endpoints
     OPENROUTER_BASE_URL: str = "https://openrouter.ai/api/v1"
@@ -54,7 +56,7 @@ class AppConfig:
     RESEARCH_MODES: list = field(default_factory=lambda: ["fundamental", "momentum", "all", "quick"])
     
     # Synthesis Orchestration
-    MAX_SYNTHESIS_ITERATIONS: int = 1
+    MAX_SYNTHESIS_ITERATIONS: int = 4
     PHASE_THROTTLE_SECONDS: float = 1.0
 
     def verifyConfiguration(self):
@@ -118,16 +120,48 @@ WEB_SEARCH_TOOL_DEFINITION = {
 FINVIZ_TOOL_DEFINITION = {
     "get_finviz_data": {
         "name": "get_finviz_data",
-        "description": "Fetch high-fidelity financial data and market snapshots from Finviz for a specific ticker.",
+        "description": "Scrapes and CACHES high-fidelity financial data from Finviz. Returns a SUMMARY MANIFEST of the available data sizes, NOT the full data. You MUST use `filter_finviz_data` afterward to extract specific payloads.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "ticker": {"type": "string", "description": "The stock ticker symbol (e.g., 'AAPL')"}
+            },
+            "required": ["ticker"]
+        }
+    }
+}
+
+FILTER_FINVIZ_TOOL_DEFINITION = {
+    "filter_finviz_data": {
+        "name": "filter_finviz_data",
+        "description": "Extract specific dictionary keys or slice lists from a previously cached Finviz scrape based on date ranges.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "ticker": {
                     "type": "string",
-                    "description": "The stock ticker symbol (e.g., 'AAPL', 'TSLA')"
+                    "description": "The stock ticker symbol."
+                },
+                "data_key": {
+                    "type": "string",
+                    "enum": ["fundamentals", "analyst_ratings", "recent_headlines", "insider_trading", "institutional_ownership"],
+                    "description": "The specific data section to extract."
+                },
+                "start_date": {
+                    "type": "string", 
+                    "description": "Optional: Filter results starting from this date (e.g. 'Feb-15-26' or 'Feb-15' or 'Today'). Use to isolate post-earnings sentiment."
+                },
+                "end_date": {
+                    "type": "string",
+                    "description": "Optional: Filter results ending on this date."
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Optional: max items to return. Default is 25.",
+                    "default": 25
                 }
             },
-            "required": ["ticker"]
+            "required": ["ticker", "data_key"]
         }
     }
 }
@@ -208,7 +242,14 @@ Confidence Threshold: If you are 80%+ confident you can derive an answer from ex
 SYNTHESIS_FINAL_THESIS_TEMPLATE = """
 Research complete. Produce the final investment decision document using all the data we've gathered across our entire conversation.
 
-Follow the writing style guide and templates in your system prompt (Mode 3) and `synthesis_writing_guide.md`.
+Follow the specific writing style guide provided below:
+
+---
+## SYNTHESIS WRITING GUIDE
+{writingGuide}
+---
+
+Your goal is to build a high-fidelity, falsifiable thesis for {investmentQuery}.
 """
 
 # --- Output Templates ---

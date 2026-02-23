@@ -9,6 +9,8 @@ from typing import Dict, Optional, Any
 from dataclasses import dataclass, field
 from pathlib import Path
 from datetime import datetime
+import sys
+import argparse
 from output_pruner import pruneAgentOutput
 import internal_configs as cfg
 from llm_client import getLlmClient
@@ -18,10 +20,10 @@ from agent_engine import (
     WebSearchAgent, 
     InternalAgentAdapter, 
     AgentSpecLoader,
-    FinvizAdapter
+    FinvizAdapter,
+    CompositeAgentAdapter
 )
 from mcp import StdioServerParameters
-from monitoring_wrapper import patch_multi_agent
 from finviz_scraper import FinvizScraper
 
 # Environment variables are loaded automatically by internal_configs
@@ -112,9 +114,11 @@ class ResearchOrchestrator:
                     "--add-host=host.docker.internal:host-gateway",
                     "-e", f"OPENROUTER_API_KEY={self.apiKey}",
                     "-e", f"GRAPHRAG_DATABASE={cfg.config.GRAPHRAG_DATABASE}",
+                    "-e", f"R2_DB_URL={cfg.config.R2_DB_URL}",
+                    "-e", "PYTHONUNBUFFERED=1",
                     "-e", "NODE_NO_WARNINGS=1",
-                    cfg.config.GRAPHRAG_IMAGE,
-                    "npx", "tsx", "mcp_server.ts"
+                    cfg.config.GRAPHRAG_IMAGE
+                    # Note: No explicit command here; uses Dockerfile CMD ["/app/start_query.sh"]
                 ],
                 env=None
             ))
@@ -133,7 +137,7 @@ class ResearchOrchestrator:
         self.qualitativeAgent = self._initializeAgentFromSpec(
             "qualitative_agent.md", 
             mcpProvider=self.toolProviders["graphrag"],
-            agentAdapter=self.webSearchAdapter
+            agentAdapter=CompositeAgentAdapter([self.webSearchAdapter, self.finvizAdapter])
         )
         
         self.quantitativeAgent = self._initializeAgentFromSpec(
@@ -144,7 +148,8 @@ class ResearchOrchestrator:
         
         self.synthesisAgent = self._initializeAgentFromSpec(
             "synthesis_agent.md",
-            agentAdapter=self.webSearchAdapter
+            agentAdapter=CompositeAgentAdapter([self.webSearchAdapter, self.finvizAdapter]),
+            modelOverride=cfg.config.SYNTHESIS_MODEL
         )
         
         self.momentumAgent = self._initializeAgentFromSpec(
@@ -158,7 +163,8 @@ class ResearchOrchestrator:
         self, 
         filename: str, 
         mcpProvider: Optional[McpToolProvider] = None,
-        agentAdapter: Optional[InternalAgentAdapter] = None
+        agentAdapter: Optional[InternalAgentAdapter] = None,
+        modelOverride: Optional[str] = None
     ) -> Agent:
         """Instantiate a specialized Agent from a markdown persona specification."""
         fullPath = self.agentsDir / filename
@@ -169,7 +175,7 @@ class ResearchOrchestrator:
         return Agent(
             agentProfile, 
             self.llmClient, 
-            self.model, 
+            modelOverride or self.model, 
             mcpProvider, 
             agentAdapter
         )
@@ -427,7 +433,19 @@ class ResearchOrchestrator:
         """
         logger.info("Finalizing Fundamental Analysis (Mode 3 Synthesis)")
         
-        finalPrompt = cfg.SYNTHESIS_FINAL_THESIS_TEMPLATE.format(investmentQuery=query)
+        # Load the writing guide content to pipe directly into the prompt
+        guidePath = self.agentsDir / "synthesis_writing_guide.md"
+        try:
+            with open(guidePath, 'r', encoding='utf-8') as f:
+                writingGuideContent = f.read()
+        except Exception as e:
+            logger.error(f"Failed to load writing guide: {e}")
+            writingGuideContent = "Error: Writing guide not found."
+
+        finalPrompt = cfg.SYNTHESIS_FINAL_THESIS_TEMPLATE.format(
+            investmentQuery=query,
+            writingGuide=writingGuideContent
+        )
         return await self.synthesisAgent.performResearchTask(finalPrompt)
 
     async def phase_MomentumFinalization(self, query: str) -> str:
@@ -513,11 +531,19 @@ class ResearchOrchestrator:
         logger.info(f"Human-Centric Report: {reportPath}")
 
 async def main():
+    parser = argparse.ArgumentParser(description="Multi-Agent Investment Research System")
+    parser.add_argument("--query", type=str, help="Investment research query")
+    parser.add_argument("--mode", type=str, choices=["fundamental", "momentum", "all", "quick"], 
+                        default=cfg.config.DEFAULT_RESEARCH_MODE, help="Research strategy")
+    
+    args = parser.parse_args()
+    
     # Patch for monitoring when running CLI directly
     try:
+        from monitoring_wrapper import patch_multi_agent
         patch_multi_agent()
-    except ImportError:
-        pass
+    except Exception as e:
+        logger.warning(f"Monitoring patch skipped: {e}")
 
     try:
         cfg.config.verifyConfiguration()
@@ -525,17 +551,25 @@ async def main():
         print(e)
         return
         
-    query = input(f"Enter target query [{cfg.config.DEFAULT_INVESTMENT_QUERY}]: ").strip() or cfg.config.DEFAULT_INVESTMENT_QUERY
+    query = args.query
+    if not query:
+        if sys.stdin.isatty():
+            query = input(f"Enter target query [{cfg.config.DEFAULT_INVESTMENT_QUERY}]: ").strip() or cfg.config.DEFAULT_INVESTMENT_QUERY
+        else:
+            query = cfg.config.DEFAULT_INVESTMENT_QUERY
     
-    print("\nSelect Investigation Strategy:")
-    print("1. Fundamental Strategy (Comprehensive Research)")
-    print("2. Momentum Strategy (Technical/Flow Focus)")
-    print("3. Hybrid Strategy (All Specialist Agents)")
-    print("0. Quick Strategy (Direct Answer, No Files)")
-    choice = input("\nSelect Strategy [1-3, 0 for Quick]: ").strip()
-    
-    modeMap = {"1": "fundamental", "2": "momentum", "3": "all", "0": "quick"}
-    mode = modeMap.get(choice, "fundamental")
+    mode = args.mode
+    if not args.query and sys.stdin.isatty():
+        print("\nSelect Investigation Strategy:")
+        print("1. Fundamental Strategy (Comprehensive Research)")
+        print("2. Momentum Strategy (Technical/Flow Focus)")
+        print("3. Hybrid Strategy (All Specialist Agents)")
+        print("0. Quick Strategy (Direct Answer, No Files)")
+        choice = input(f"\nSelect Strategy [1-3, 0 for Quick, Default {mode}]: ").strip()
+        
+        modeMap = {"1": "fundamental", "2": "momentum", "3": "all", "0": "quick"}
+        if choice in modeMap:
+            mode = modeMap[choice]
     
     orchestrator = ResearchOrchestrator(mode=mode)
     

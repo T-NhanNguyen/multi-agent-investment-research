@@ -2,6 +2,14 @@
 
 A sophisticated coordination system for automated investment research. It leverages a multi-agent, synthesis-driven iterative architecture to provide high-conviction investment theses using stateful LLM agents and the Model Context Protocol (MCP).
 
+## Recent Progress & Milestones (v1.7)
+
+- **Finviz Orchestration Shift**: The **Synthesis Agent** now initiates the primary Finviz scrape via `get_finviz_data` as a mandatory first step. This populates a shared memory cache in the `FinvizAdapter`, preventing redundant 100KB JSON payloads in specialist context windows.
+- **Surgical Data Filtering**: Implemented the `filter_finviz_data` tool. Specialized agents now pull targeted subsets (e.g., `recent_headlines` or `insider_trading`) with precise `start_date` and `end_date` filters to isolate post-earnings sentiment.
+- **Sentiment Flip Logic**: Integrated a 4-step analysis workflow: mapping price extremes, correlating catalyst dates (earnings), verifying insider alignment, and performing "New Norm" strategic inferences.
+- **Scraper "Sticky Dates" Fix**: Upgraded `finviz_scraper.py` to maintain date state during parsing. Headlines that previously defaulted to "Recent" now correctly inherit their parent date anchor, enabling deterministic time-series filtering.
+- **Model Heterogeneity**: Added support for `SYNTHESIS_MODEL` in `internal_configs.py`. The Synthesis Agent can now be routed to higher-reasoning models (e.g., DeepSeek-R1) while specialists remain on faster, task-oriented flash models.
+
 ## Recent Progress & Milestones (v1.6)
 
 - **Finviz Scraper Integration**: Implemented `finviz_scraper.py` using **Crawl4AI v0.8**. The system now fetches high-fidelity market data and stock profiles directly into the Quantitative Agent's context.
@@ -57,8 +65,11 @@ The integration of `crawl4ai` yielded several critical architectural insights:
 
 The system follows a modular, agentic design pattern:
 
-- **Orchestration**: `ResearchOrchestrator` (in `multi_agent_investment.py`) manages the 4-phase research workflow.
-- **Agent Engine**: `agent_engine.py` contains the core `Agent` logic, state management (`messageHistory`), and `McpToolProvider` integration. This layer is decoupled from specific LLM vendors.
+- **Orchestration**: `ResearchOrchestrator` (in `multi_agent_investment.py`) manages the 4-phase research workflow. It handles the initial Finviz "warm-up" by giving the Synthesis Agent access to the `FinvizAdapter`.
+- **Agent Engine**: `agent_engine.py` contains the core `Agent` logic, state management (`messageHistory`), and sharing protocols. The `FinvizAdapter` implements an internal payload cache, allowing agents to share a single high-fidelity scrape without duplicating tokens.
+- **Workflow Adapters**:
+  - `FinvizAdapter`: Manages scraping and the `filter_finviz_data` query logic.
+  - `CompositeAgentAdapter`: Enables an agent to utilize multiple toolsets (e.g., Web Search + Finviz) simultaneously.
 - **LLM Transport Layer**: `llm_client.py` provides an abstraction (`ILlmClient`) returning structured `ChatResponse` objects. Implementations include:
   - `OpenAIClient`: Primary SDK-based client for OpenRouter and OpenAI. Supports stateful history and reasoning extraction.
   - `LocalLlmClient`: Development-grade client for local model runners (Ollama, etc.).
@@ -117,11 +128,14 @@ For a deeper dive into running local models, see [local_llm_guide.md](./local_ll
 # Production (OpenRouter)
 invest-research
 
+# Finviz Diagnostic (Standalone)
+docker compose run --rm monitoring-api python finviz_scraper.py [TICKER]
+
 # Integration Testing (Mocked LLM)
-docker-compose run --rm investment-research python tests/test_mock_workflow.py
+docker compose run --rm investment-research python tests/test_mock_workflow.py
 
 # Live Stateful Verification
-docker-compose run --rm investment-research python tests/test_openai_stateful.py
+docker compose run --rm investment-research python tests/test_openai_stateful.py
 ```
 
 ## Testing Procedures

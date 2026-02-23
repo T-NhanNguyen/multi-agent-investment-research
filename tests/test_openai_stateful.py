@@ -12,7 +12,8 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import internal_configs as cfg
 from llm_client import OpenAIClient, getLlmClient
-from agent_engine import Agent, AgentSpecLoader
+from agent_engine import Agent, AgentSpecLoader, McpToolProvider
+from mcp import StdioServerParameters
 
 # Configure verbose logging without emojis
 logging.basicConfig(
@@ -42,9 +43,45 @@ class TestLiveOpenAIStateful(unittest.IsolatedAsyncioTestCase):
             content = f.read()
 
         self.profile = AgentSpecLoader.loadFromMarkdown(content)
-        self.agent = Agent(profile=self.profile, llmClient=self.client, model=self.model)
+        
+        # Initialize GraphRAG Tool Provider for tool-calling test
+        registryPath = cfg.config.GRAPHRAG_REGISTRY_DIR
+        projectHomePath = cfg.config.GRAPHRAG_PROJECT_PATH
+        
+        self.provider = McpToolProvider("graphrag", StdioServerParameters(
+            command="docker",
+            args=[
+                "run", "-i", "--rm",
+                "-v", f"{projectHomePath}:/app",
+                "-v", f"{cfg.config.GRAPHRAG_NODE_MODULES_VOLUME}:/app/node_modules",
+                "-v", f"{registryPath}:/root/.graphrag",
+                "-v", f"{projectHomePath}/.DuckDB:/app/.DuckDB",
+                "-v", f"{projectHomePath}/output:/app/output",
+                "--add-host=host.docker.internal:host-gateway",
+                "-e", f"OPENROUTER_API_KEY={api_key}",
+                "-e", f"GRAPHRAG_DATABASE={cfg.config.GRAPHRAG_DATABASE}",
+                "-e", f"R2_DB_URL={cfg.config.R2_DB_URL}",
+                "-e", "PYTHONUNBUFFERED=1",
+                "-e", "NODE_NO_WARNINGS=1",
+                cfg.config.GRAPHRAG_IMAGE
+            ],
+            env=None
+        ))
+        await self.provider.connect()
+
+        self.agent = Agent(
+            profile=self.profile, 
+            llmClient=self.client, 
+            model=self.model,
+            mcpProvider=self.provider
+        )
 
         logger.info(f"Live Test Setup: Agent [{self.profile.name}] using model [{self.model}] via OpenRouter SDK")
+
+    async def asyncTearDown(self):
+        """Cleanup tool providers."""
+        if hasattr(self, 'provider'):
+            await self.provider.cleanup()
 
     async def test_live_ambiguous_context_preservation(self):
         """
@@ -60,24 +97,32 @@ class TestLiveOpenAIStateful(unittest.IsolatedAsyncioTestCase):
         res1 = await self.agent.performResearchTask(q1)
         self._printPrettyResponse(1)
         
-        # Verify Turn 1 established history and structured response
         self.assertTrue(len(self.agent.messageHistory) >= 3) # System + User + Assistant
         self.assertIsNotNone(self.agent.lastResponse.id)
         self.assertTrue("total_tokens" in self.agent.lastResponse.usage)
         
-        # Turn 2: Highly Ambiguous Follow-up
-        q2 = "What is haste?"
-        logger.info(f"Turn 2 Query: {q2}")
-        
-        res2 = await self.agent.performResearchTask(q2)
+        # Turn 2: Injected Tool Call (Corpus Health Check)
+        q_health = "Wait, before we continue, perform a health check on the knowledge graph to ensure it's loaded correctly."
+        logger.info(f"Injected Health Turn: {q_health}")
+        res_health = await self.agent.performResearchTask(q_health)
         self._printPrettyResponse(2)
         
+        # Verify tool call was likely made
+        self.assertTrue(len(self.agent.messageHistory) >= 5) # (System, U1, A1, U_H, A_H)
+        
+        # Turn 3: Updated Prior Turn 2 (Reflecting health check + original context)
+        q3 = "Now, based on that health check and our previous discussion about Rocket Lab, how well is the 'haste' program represented in the corpus?"
+        logger.info(f"Turn 3 Query: {q3}")
+        
+        res3 = await self.agent.performResearchTask(q3)
+        self._printPrettyResponse(3)
+        
         # Validation Logic for Context
-        context_keywords = ["Rocket Lab", "Hypersonic", "Test", "Electron", "Suborbital", "HASTE"]
-        found_context = any(word.lower() in res2.lower() for word in context_keywords)
+        context_keywords = ["Rocket Lab", "Hypersonic", "Test", "Electron", "Suborbital", "HASTE", "Corpus", "Health", "Stats"]
+        found_context = any(word.lower() in res3.lower() for word in context_keywords)
         
         self.assertTrue(found_context, 
-            "Turn 2 response failed to maintain context. It likely returned a general definition of 'haste'.")
+            "Turn 3 response failed to maintain context or reflect the health check.")
         
         # Validation for Structure
         self.assertIsNotNone(self.agent.lastResponse.id)
