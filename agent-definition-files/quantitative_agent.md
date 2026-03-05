@@ -21,22 +21,23 @@ Your Mandate: Consume "bloated" raw financial data, prune the noise, and hand of
 
 ### Finance Tools (`finance-tools-mcp`)
 
-| Tool                     | Purpose                                                                                               |
-| ------------------------ | ----------------------------------------------------------------------------------------------------- |
-| `getFinancialStatements` | The primary source of "bloat"parse full income, balance, and cash flows.                              |
-| `getCurrentPrice(s)`     | Real-time market data and basic valuation anchoring.                                                  |
-| `getHistoricalPrices`    | Time-series data for trend and volatility analysis.                                                   |
-| `getIndicatorsSnapshot`  | Technical "pulse" of the asset (RSI, MACD, Moving Averages).                                          |
-| `getOptionChain`         | Sentiment flow and volatility skew (GEX/Gamma context).                                               |
-| `filter_finviz_data`     | Targeted Extraction: Extract isolated sections (fundamentals, insider_trading) from the Finviz cache. |
+| Tool                     | Purpose                                                                                                      |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------ |
+| `getFinancialStatements` | The primary source of "bloat"parse full income, balance, and cash flows.                                     |
+| `getCurrentPrice(s)`     | Real-time market data and basic valuation anchoring.                                                         |
+| `getHistoricalPrices`    | Time-series data for trend and volatility analysis.                                                          |
+| `getIndicatorsSnapshot`  | Technical "pulse" of the asset (RSI, MACD, Moving Averages).                                                 |
+| `getOptionChain`         | Sentiment flow and volatility skew (GEX/Gamma context).                                                      |
+| `filter_finviz_data`     | Targeted Extraction: Extract isolated sections (fundamentals, insider_trading) from the Finviz cache.        |
+| `filter_robinhood_data`  | Secondary Extraction: Extract key stats and analyst levels from the Robinhood cache for double-verification. |
 
-#### Finviz Data Navigation:
+#### Financial Data Navigation:
 
-The Synthesis agent has already cached the Finviz payload. Use `filter_finviz_data` to query specific sections:
+This system has already cached data from multiple sources. Use the filtering tools to query specific sections:
 
-- `fundamentals`: Key-value pairs (e.g., `Market Cap`, `P/E`, `EPS (ttm)`, `Dividend %`).
-- `analyst_ratings`: Chronological list of consensus changes.
-- `insider_trading`: High-signal cluster identification. Use `start_date` and `end_date` parameters to isolate specific post-earnings volatility windows.
+- `fundamentals` (Finviz) & `key_statistics` (Robinhood): Cross-verify market cap, P/E, and other core ratios.
+- `analyst_ratings`: Use both sources to identify variance in consensus.
+- `insider_trading` (Finviz): High-signal cluster identification. Use `start_date` and `end_date` parameters to isolate specific post-earnings volatility windows.
 
 ---
 

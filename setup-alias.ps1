@@ -3,7 +3,8 @@
 
 # $projectPath = "E:\ai-workspace\projects\multi-agent-investment-research"
 $projectPath = $PSScriptRoot
-$aliasCommand = "function invest-research { docker compose -f '$projectPath\docker-compose.yml' run --rm investment-research `$args }"
+$researchAlias = "function invest-research { docker compose -f '$projectPath\docker-compose.yml' run --rm investment-research `$args }"
+$logsAlias = "function invest-logs { fly logs -a investment-orchestrator }"
 
 $profilePath = $PROFILE.CurrentUserAllHosts
 
@@ -11,24 +12,25 @@ if (!(Test-Path $profilePath)) {
     New-Item -Path $profilePath -ItemType File -Force | Out-Null
 }
 
-# Check if alias already exists
+# Check if aliases already exist
 $existingContent = Get-Content $profilePath -ErrorAction SilentlyContinue
-if ($existingContent -match "invest-research") {
-    Write-Host "⚠ Alias 'invest-research' already exists in profile" -ForegroundColor Yellow
+if ($existingContent -match "invest-research" -or $existingContent -match "invest-logs") {
+    Write-Host "⚠ Research aliases already exist in profile" -ForegroundColor Yellow
     $answer = Read-Host "Overwrite? (y/n)"
     if ($answer -ne "y") {
         Write-Host "✗ Installation cancelled" -ForegroundColor Red
         exit
     }
-    # Remove old alias
-    $newContent = $existingContent | Where-Object { $_ -notmatch "invest-research" }
+    # Remove old aliases
+    $newContent = $existingContent | Where-Object { $_ -notmatch "invest-research" -and $_ -notmatch "invest-logs" }
     Set-Content -Path $profilePath -Value $newContent
 }
 
-Add-Content -Path $profilePath -Value "`n# Multi-Agent Investment Research Alias"
-Add-Content -Path $profilePath -Value $aliasCommand
+Add-Content -Path $profilePath -Value "`n# Multi-Agent Investment Research Aliases"
+Add-Content -Path $profilePath -Value $researchAlias
+Add-Content -Path $profilePath -Value $logsAlias
 
-Write-Host "✓ Alias 'invest-research' added to PowerShell profile" -ForegroundColor Green
+Write-Host "✓ Aliases 'invest-research' and 'invest-logs' added to PowerShell profile" -ForegroundColor Green
 Write-Host "  Location: $profilePath" -ForegroundColor Cyan
 Write-Host "`nTo activate, run:" -ForegroundColor Yellow
 Write-Host "  . `$PROFILE" -ForegroundColor White

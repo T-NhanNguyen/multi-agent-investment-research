@@ -17,9 +17,9 @@ class AppConfig:
     
     # Model Selection
     PRIMARY_MODEL: str = os.getenv("MODEL_NAME", "z-ai/glm-4.5-air:free")
-    SYNTHESIS_MODEL: str = os.getenv("SYNTHESIS_MODEL", os.getenv("MODEL_NAME", "deepseek/deepseek-r1-0528:free"))
-    WEB_SEARCH_MODEL: str = os.getenv("WEB_SEARCH_MODEL", os.getenv("MODEL_NAME", "z-ai/glm-4.5-air:free"))
-    INTEGRATION_TEST_MODEL: str = os.getenv("INTEGRATION_TEST_MODEL", "z-ai/glm-4.5-air:free")
+    SYNTHESIS_MODEL: str = os.getenv("SYNTHESIS_MODEL", PRIMARY_MODEL)
+    WEB_SEARCH_MODEL: str = os.getenv("WEB_SEARCH_MODEL", PRIMARY_MODEL)
+    INTEGRATION_TEST_MODEL: str = os.getenv("INTEGRATION_TEST_MODEL", PRIMARY_MODEL)
     LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "openrouter").lower()
     LOCAL_LLM_URL: str = os.getenv("LOCAL_LLM_URL", "http://host.docker.internal:12434").strip()
     CRAWL4AI_BASE_URL: str = os.getenv("CRAWL4AI_BASE_URL", "http://host.docker.internal:11235").strip()
@@ -32,23 +32,26 @@ class AppConfig:
     PHASE_THROTTLE_SECONDS: float = 1.0
     OUTPUT_DIR: str = os.getenv("OUTPUT_DIR", "./output")
     
+    # API Endpoints
+    GRAPHRAG_API_URL: str = os.getenv("GRAPHRAG_API_URL", "").strip()
+    USE_REMOTE_GRAPHRAG: bool = bool(GRAPHRAG_API_URL)
+    
     # Docker & MCP Configuration
     FINANCE_TOOLS_IMAGE: str = os.getenv("FINANCE_TOOLS_IMAGE", "finance-tools-finance-tools")
     GRAPHRAG_IMAGE: str = "graphrag-query"
     GRAPHRAG_NODE_MODULES_VOLUME: str = "graphrag_node_modules"
     GRAPHRAG_DEFAULT_DB: str = "investment-analysis"
     
-    # Path Configuration (GraphRAG)
-    GRAPHRAG_REGISTRY_DIR: str = os.getenv("GRAPHRAG_REGISTRY_DIR", "").strip()
-    GRAPHRAG_PROJECT_PATH: str = os.getenv("GRAPHRAG_PROJECT_PATH", "").strip()
-    GRAPHRAG_DATABASE: str = os.getenv("GRAPHRAG_DATABASE", "investment-analysis").strip()
-    R2_DB_URL: str = os.getenv("R2_DB_URL", "").strip()
-    
-    # API Endpoints
     OPENROUTER_BASE_URL: str = "https://openrouter.ai/api/v1"
     OPENROUTER_CHAT_ENDPOINT: str = f"{OPENROUTER_BASE_URL}/chat/completions"
     OPENROUTER_RESPONSES_ENDPOINT: str = f"{OPENROUTER_BASE_URL}/responses"
     OPENAI_CHAT_ENDPOINT: str = "https://api.openai.com/v1"
+    
+    # Path Configuration (GraphRAG - Required for Local Mode)
+    GRAPHRAG_REGISTRY_DIR: str = os.getenv("GRAPHRAG_REGISTRY_DIR", "").strip()
+    GRAPHRAG_PROJECT_PATH: str = os.getenv("GRAPHRAG_PROJECT_PATH", "").strip()
+    GRAPHRAG_DATABASE: str = os.getenv("GRAPHRAG_DATABASE", "investment-analysis").strip()
+    R2_DB_URL: str = os.getenv("R2_DB_URL", "").strip()
     
     # Defaults
     DEFAULT_INVESTMENT_QUERY: str = "Analyze Tesla (TSLA)"
@@ -61,18 +64,30 @@ class AppConfig:
 
     def verifyConfiguration(self):
         """
-        Strict validation of required environment variables.
-        Ensures the system fails fast if the operational bedrock is missing.
+        Strict validation based on whether we are in Local or Remote mode.
         """
         missingVars = []
         if not self.OPENROUTER_API_KEY:
             missingVars.append("OPENROUTER_API_KEY")
         if not self.PRIMARY_MODEL:
             missingVars.append("MODEL_NAME")
-        if not self.GRAPHRAG_REGISTRY_DIR:
-            missingVars.append("GRAPHRAG_REGISTRY_DIR")
-        if not self.GRAPHRAG_PROJECT_PATH:
-            missingVars.append("GRAPHRAG_PROJECT_PATH")
+            
+        # If NOT using cloud GraphRAG, we MUST have local paths for Docker to work
+        if not self.USE_REMOTE_GRAPHRAG:
+            if not self.GRAPHRAG_REGISTRY_DIR:
+                missingVars.append("GRAPHRAG_REGISTRY_DIR (Required for Local Docker mode)")
+            if not self.GRAPHRAG_PROJECT_PATH:
+                missingVars.append("GRAPHRAG_PROJECT_PATH (Required for Local Docker mode)")
+            
+        if missingVars:
+            errorReport = (
+                "\n" + "!" * 50 + "\n"
+                "CRITICAL ERROR: Environment Configuration Incomplete\n"
+                f"Missing variables: {', '.join(missingVars)}\n"
+                "Please check your .env file.\n"
+                "!" * 50 + "\n"
+            )
+            raise ValueError(errorReport)
             
         if missingVars:
             errorReport = (
@@ -165,6 +180,43 @@ FILTER_FINVIZ_TOOL_DEFINITION = {
         }
     }
 }
+
+ROBINHOOD_TOOL_DEFINITION = {
+    "get_robinhood_data": {
+        "name": "get_robinhood_data",
+        "description": "Scrapes and CACHES high-fidelity stock profile data from Robinhood (Key Statistics, Analyst Ratings, Correlated Tickers). Returns a SUMMARY manifest of the available data sections, NOT the full data. You MUST use `filter_robinhood_data` afterward to extract specific payloads.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "ticker": {"type": "string", "description": "The stock ticker symbol (e.g., 'AAPL')"}
+            },
+            "required": ["ticker"]
+        }
+    }
+}
+
+FILTER_ROBINHOOD_TOOL_DEFINITION = {
+    "filter_robinhood_data": {
+        "name": "filter_robinhood_data",
+        "description": "Extract specific dictionary keys (like 'key_statistics' or 'analyst_ratings') from a previously cached Robinhood scrape.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "ticker": {
+                    "type": "string",
+                    "description": "The stock ticker symbol."
+                },
+                "data_key": {
+                    "type": "string",
+                    "enum": ["key_statistics", "stock_snapshot", "analyst_ratings", "news", "correlated_tickers"],
+                    "description": "The specific data section to extract."
+                }
+            },
+            "required": ["ticker", "data_key"]
+        }
+    }
+}
+
 
 # --- Prompt Templates ---
 

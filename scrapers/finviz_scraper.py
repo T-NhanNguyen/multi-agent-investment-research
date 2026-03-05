@@ -3,27 +3,21 @@
 
 import asyncio
 import logging
-import httpx
 import re
 import json
 import sys
 from typing import Dict, List, Any, Optional
-import internal_configs as cfg
+from scrapers.base_scraper import Crawl4AiBaseScraper
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-class FinvizScraper:
+class FinvizScraper(Crawl4AiBaseScraper):
     """
     Specialized scraper for extracting high-signal financial data from Finviz.
     Uses crawl4ai service to handle complex renderings and extract clean markdown.
     """
-
-    def __init__(self, baseUrl: Optional[str] = None):
-        self.baseUrl = (baseUrl or cfg.config.CRAWL4AI_BASE_URL).rstrip('/')
-        self.apiToken = cfg.config.CRAWL4AI_API_TOKEN
-        logger.info(f"FinvizScraper initialized with Crawl4AI at: {self.baseUrl}")
 
     async def scrapeTicker(self, ticker: str) -> Dict[str, Any]:
         """
@@ -33,50 +27,9 @@ class FinvizScraper:
         ticker = ticker.upper().strip()
         url = f"https://finviz.com/quote.ashx?t={ticker}&ty=c&ta=1&p=d"
         
-        logger.info(f"FinvizScraper: Initiating scrape for {ticker} -> {url}")
-        
-        payload = {
-            "urls": [url],
-            "browser_config": {"headless": True},
-            "crawler_config": {}
-        }
-        
-        headers = {}
-        if self.apiToken:
-            headers["Authorization"] = f"Bearer {self.apiToken}"
-            
-        try:
-            async with httpx.AsyncClient(timeout=120.0) as client:
-                submitResp = await client.post(f"{self.baseUrl}/crawl", json=payload, headers=headers)
-                submitResp.raise_for_status()
-                submitResult = submitResp.json()
-                
-                taskId = submitResult.get("task_id")
-                if not taskId:
-                    return self._extractFromResult(ticker, url, submitResult)
-                
-                logger.info(f"FinvizScraper: Task queued {taskId}, polling for result...")
-                MAX_POLL_ATTEMPTS = 30
-                POLL_INTERVAL_SECONDS = 3
-                
-                for attempt in range(MAX_POLL_ATTEMPTS):
-                    await asyncio.sleep(POLL_INTERVAL_SECONDS)
-                    taskResp = await client.get(f"{self.baseUrl}/task/{taskId}", headers=headers)
-                    taskResp.raise_for_status()
-                    taskResult = taskResp.json()
-                    
-                    status = taskResult.get("status")
-                    if status == "completed":
-                        return self._extractFromResult(ticker, url, taskResult)
-                    elif status == "failed":
-                        error = taskResult.get("error", "Unknown task failure")
-                        return {"ticker": ticker, "success": False, "error": error}
-                
-                return {"ticker": ticker, "success": False, "error": "Timed out waiting for crawl task"}
-                    
-        except Exception as exc:
-            logger.error(f"FinvizScraper: error for {ticker}: {exc}")
-            return {"ticker": ticker, "success": False, "error": str(exc)}
+        res = await self.scrape_url(url)
+        res["ticker"] = ticker
+        return res
 
     def _pruneContent(self, content: str) -> str:
         """Surgically removes noise from Finviz markdown content - following test_finviz_pruner.py + fixes."""
@@ -250,36 +203,10 @@ class FinvizScraper:
 
         return data
 
-    def _extractFromResult(self, ticker: str, url: str, result: Dict) -> Dict[str, Any]:
-        resultData = result.get("result") or result
-        scrapeResults = resultData.get("results", []) or ([resultData] if resultData.get("markdown") else [])
-        
-        if not scrapeResults:
-            return {"ticker": ticker, "success": False, "error": "No results in response"}
-        
-        res = scrapeResults[0]
-        markdownData = res.get('markdown', '')
-        
-        if isinstance(markdownData, dict):
-            raw_content = markdownData.get('fit_markdown') or markdownData.get('raw_markdown') or ""
-        else:
-            raw_content = str(markdownData)
-        
-        pruned_md = self._pruneContent(raw_content)
-        structured_data = self._parseToDict(pruned_md)
-        
-        return {
-            "ticker": ticker,
-            "success": True,
-            "url": url,
-            "data": structured_data,
-            "metadata": res.get('metadata', {})
-        }
-
 if __name__ == "__main__":
     async def main():
         if len(sys.argv) < 2:
-            print("Usage: python finviz_scraper.py <TICKER> [--full]")
+            print("Usage: python -m scrapers.finviz_scraper <TICKER> [--full]")
             return
             
         ticker = sys.argv[1]

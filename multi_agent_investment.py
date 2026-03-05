@@ -21,10 +21,11 @@ from agent_engine import (
     InternalAgentAdapter, 
     AgentSpecLoader,
     FinvizAdapter,
+    RobinhoodAdapter,
     CompositeAgentAdapter
 )
 from mcp import StdioServerParameters
-from finviz_scraper import FinvizScraper
+from scrapers import FinvizScraper, RobinhoodScraper
 
 # Environment variables are loaded automatically by internal_configs
 
@@ -88,21 +89,29 @@ class ResearchOrchestrator:
         self.logDir.mkdir(exist_ok=True)
         self.reportDir.mkdir(exist_ok=True)
         
-        # GraphRAG path validation (required for Docker sibling volume mounts)
-        registryPath = cfg.config.GRAPHRAG_REGISTRY_DIR
-        projectHomePath = cfg.config.GRAPHRAG_PROJECT_PATH
-        
-        if not registryPath or not projectHomePath:
-            raise ValueError("GRAPHRAG_REGISTRY_DIR or GRAPHRAG_PROJECT_PATH not set in .env")
-            
         # Initialize Tool Providers
         self.toolProviders: Dict[str, McpToolProvider] = {
             "finance": McpToolProvider("finance-tools", StdioServerParameters(
                 command="docker",
                 args=["run", "-i", "--rm", cfg.config.FINANCE_TOOLS_IMAGE],
                 env=None
-            )),
-            "graphrag": McpToolProvider("graphrag", StdioServerParameters(
+            ))
+        }
+
+        # Add GraphRAG provider: Remote SSE or Local Stdio
+        if cfg.config.USE_REMOTE_GRAPHRAG:
+            # We append /mcp to the base URL as that's where our SSE server is listening
+            remoteUrl = cfg.config.GRAPHRAG_API_URL.rstrip('/') + "/mcp"
+            self.toolProviders["graphrag"] = McpToolProvider("graphrag", url=remoteUrl)
+        else:
+            # GraphRAG path validation (required for Docker sibling volume mounts)
+            registryPath = cfg.config.GRAPHRAG_REGISTRY_DIR
+            projectHomePath = cfg.config.GRAPHRAG_PROJECT_PATH
+            
+            if not registryPath or not projectHomePath:
+                raise ValueError("GRAPHRAG_REGISTRY_DIR or GRAPHRAG_PROJECT_PATH not set in .env")
+
+            self.toolProviders["graphrag"] = McpToolProvider("graphrag", StdioServerParameters(
                 command="docker",
                 args=[
                     "run", "-i", "--rm",
@@ -118,11 +127,9 @@ class ResearchOrchestrator:
                     "-e", "PYTHONUNBUFFERED=1",
                     "-e", "NODE_NO_WARNINGS=1",
                     cfg.config.GRAPHRAG_IMAGE
-                    # Note: No explicit command here; uses Dockerfile CMD ["/app/start_query.sh"]
                 ],
                 env=None
             ))
-        }
         
         # Initialize specialized Web Search Agent
         webSearchModel = cfg.config.WEB_SEARCH_MODEL
@@ -133,22 +140,33 @@ class ResearchOrchestrator:
         self.finvizScraper = FinvizScraper()
         self.finvizAdapter = FinvizAdapter("finviz", self.finvizScraper)
         
+        # Initialize Robinhood
+        self.robinhoodScraper = RobinhoodScraper()
+        self.robinhoodAdapter = RobinhoodAdapter("robinhood", self.robinhoodScraper)
+        
+        # Build shared specialized toolset
+        self.marketIntelligenceAdapters = [
+            self.webSearchAdapter, 
+            self.finvizAdapter, 
+            self.robinhoodAdapter
+        ]
+        
         # Bootstrap qualitative and quantitative intelligence agents
         self.qualitativeAgent = self._initializeAgentFromSpec(
             "qualitative_agent.md", 
             mcpProvider=self.toolProviders["graphrag"],
-            agentAdapter=CompositeAgentAdapter([self.webSearchAdapter, self.finvizAdapter])
+            agentAdapter=CompositeAgentAdapter(self.marketIntelligenceAdapters)
         )
         
         self.quantitativeAgent = self._initializeAgentFromSpec(
             "quantitative_agent.md", 
             mcpProvider=self.toolProviders["finance"],
-            agentAdapter=self.finvizAdapter
+            agentAdapter=CompositeAgentAdapter([self.finvizAdapter, self.robinhoodAdapter])
         )
         
         self.synthesisAgent = self._initializeAgentFromSpec(
             "synthesis_agent.md",
-            agentAdapter=CompositeAgentAdapter([self.webSearchAdapter, self.finvizAdapter]),
+            agentAdapter=CompositeAgentAdapter(self.marketIntelligenceAdapters),
             modelOverride=cfg.config.SYNTHESIS_MODEL
         )
         

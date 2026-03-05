@@ -10,10 +10,11 @@ from dataclasses import dataclass
 from contextlib import AsyncExitStack
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
+from mcp.client.sse import sse_client
 from output_pruner import pruneAgentOutput
 from llm_client import ILlmClient, ChatResponse
 import internal_configs as cfg
-from finviz_scraper import FinvizScraper
+from scrapers import FinvizScraper, RobinhoodScraper
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -28,27 +29,35 @@ class AgentProfile:
     fullSpec: str  # Complete markdown content as system prompt
 
 class McpToolProvider:
-    """Bridges OpenRouter API with Local Docker MCP Servers to provide specialized toolsets."""
+    """Bridges OpenRouter API with MCP Servers (Local Stdio or Remote SSE)."""
     
-    def __init__(self, name: str, serverParams: StdioServerParameters):
+    def __init__(self, name: str, serverParams: Optional[StdioServerParameters] = None, url: Optional[str] = None):
         self.name = name
         self.serverParams = serverParams
+        self.url = url
         self.session: Optional[ClientSession] = None
         self.exitStack = AsyncExitStack()
         self.toolsLibrary = {}  # Cache tool definitions
 
     async def connect(self):
-        """Establishes deterministic stdio connection to the Dockerized MCP host."""
+        """Establishes deterministic connection to the MCP host (Stdio or SSE)."""
         if self.session:
             return
 
-        logger.info(f"Connecting to McpToolProvider [{self.name}]: {self.serverParams.command} {' '.join(self.serverParams.args)}...")
-        
         try:
-            # Start the stdio transport
-            transport = await self.exitStack.enter_async_context(
-                stdio_client(self.serverParams)
-            )
+            if self.url:
+                logger.info(f"Connecting to Remote McpToolProvider [{self.name}] via SSE at {self.url}...")
+                transport = await self.exitStack.enter_async_context(
+                    sse_client(self.url)
+                )
+            elif self.serverParams:
+                logger.info(f"Connecting to Local McpToolProvider [{self.name}] via Stdio: {self.serverParams.command}...")
+                transport = await self.exitStack.enter_async_context(
+                    stdio_client(self.serverParams)
+                )
+            else:
+                raise ValueError(f"McpToolProvider [{self.name}] has no serverParams or url configured.")
+
             self.read, self.write = transport
             
             # Start the MCP session
@@ -334,6 +343,64 @@ class FinvizAdapter:
             return json.dumps(payload, indent=2)
             
         return f"Error: Tool {name} not supported by this adapter."
+
+class RobinhoodAdapter:
+    """
+    Adapter to expose RobinhoodScraper as a tool for agents.
+    """
+    
+    def __init__(self, name: str, scraper: RobinhoodScraper):
+        self.name = name
+        self.scraper = scraper
+        self.toolsLibrary = {**cfg.ROBINHOOD_TOOL_DEFINITION, **cfg.FILTER_ROBINHOOD_TOOL_DEFINITION}
+        self._cache: Dict[str, Dict] = {}
+
+    async def getOpenAiToolSchema(self) -> List[Dict]:
+        """Convert Robinhood tool definitions to OpenAI tool call schema."""
+        toolSchemas = []
+        for tool in self.toolsLibrary.values():
+            toolSchemas.append({
+                "type": "function",
+                "function": {
+                    "name": tool["name"],
+                    "description": tool["description"],
+                    "parameters": tool["inputSchema"]
+                }
+            })
+        return toolSchemas
+
+    async def executeMcpTool(self, name: str, arguments: Dict) -> str:
+        """Route tool call to the RobinhoodScraper or filter cache."""
+        ticker = arguments.get("ticker", "").upper()
+        if not ticker: return "Error: Missing ticker symbol."
+            
+        if name == "get_robinhood_data":
+            result = await self.scraper.scrapeTicker(ticker)
+            if result.get("success"):
+                data = result.get("data", {})
+                self._cache[ticker] = data
+                summary = (
+                    f"SUCCESS: Robinhood data cached for {ticker}.\n"
+                    f"Available sections: {list(data.keys())}\n"
+                    f"Use `filter_robinhood_data` to extract the specific section."
+                )
+                return summary
+            else:
+                return f"Error scraping Robinhood for {ticker}: {result.get('error')}"
+                
+        elif name == "filter_robinhood_data":
+            if ticker not in self._cache:
+                return f"Error: No cached data for {ticker}. Run `get_robinhood_data` first."
+            
+            data_key = arguments.get("data_key")
+            cached_data = self._cache[ticker]
+            if data_key not in cached_data:
+                return f"Error: '{data_key}' not found in cached Robinhood data."
+            
+            return json.dumps(cached_data[data_key], indent=2)
+            
+        return f"Error: Tool {name} not supported by this adapter."
+
 
 class CompositeAgentAdapter:
     """

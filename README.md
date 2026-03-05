@@ -2,6 +2,13 @@
 
 A sophisticated coordination system for automated investment research. It leverages a multi-agent, synthesis-driven iterative architecture to provide high-conviction investment theses using stateful LLM agents and the Model Context Protocol (MCP).
 
+## Recent Progress & Milestones (v1.8)
+
+- **Cloud Persistence & Scaling**: Implemented **Fly.io Volumes** (`orchestrator_data`) mounted to `/app/output`. Research reports and audit logs now persist across redeploys. Scaled to a single-machine architecture to ensure volume consistency for the API server.
+- **Model Inheritance Logic**: Refactored `internal_configs.py` to use a hierarchical model selection. Specialized agents now automatically inherit from `PRIMARY_MODEL` unless explicitly overridden in `.env`, reducing configuration complexity and 404 errors.
+- **Dual-Stream API**: Expanded `api_server.py` with specialized endpoints for retrieving both high-fidelity synthesis reports (`/api/papers`) and raw execution audit trails (`/api/logs`).
+- **Resilient Model Routing**: Standardized on `z-ai/glm-4.5-air:free` as the default primary model to resolve 404 errors caused by the discontinuation of older free reasoning models (e.g., DeepSeek-R1-0528).
+
 ## Recent Progress & Milestones (v1.7)
 
 - **Finviz Orchestration Shift**: The **Synthesis Agent** now initiates the primary Finviz scrape via `get_finviz_data` as a mandatory first step. This populates a shared memory cache in the `FinvizAdapter`, preventing redundant 100KB JSON payloads in specialist context windows.
@@ -93,8 +100,9 @@ To change your preferences, update the following in `internal_configs.py`:
   - Set to `"local"` for local model runners.
 - **Change Model**: Update `PRIMARY_MODEL` (Line 19). This is passed directly to the active provider.
 - **Change Endpoints**:
-  - For local: Update `LOCAL_LLM_URL` (Line 23).
-  - For production: Update `OPENROUTER_BASE_URL` or `OPENAI_CHAT_ENDPOINT`.
+  - For local: Update `LOCAL_LLM_URL` (Line 24).
+  - For production: Update `OPENROUTER_BASE_URL` (controlled by `AppConfig`).
+- **Cloud Persistence**: Production deployments utilize a Fly.io volume named `orchestrator_data` mounted at `/app/output`.
 
 ### How it works with `getLlmClient`
 
@@ -128,8 +136,10 @@ For a deeper dive into running local models, see [local_llm_guide.md](./local_ll
 # Production (OpenRouter)
 invest-research
 
-# Finviz Diagnostic (Standalone)
-docker compose run --rm monitoring-api python finviz_scraper.py [TICKER]
+# Scrapers Diagnostic (Standalone)
+docker compose run --rm monitoring-api python -m scrapers.finviz_scraper [TICKER]
+docker compose run --rm monitoring-api python -m scrapers.seeking_alpha_scraper [TICKER]
+docker compose run --rm monitoring-api python -m scrapers.robinhood_scraper [TICKER]
 
 # Integration Testing (Mocked LLM)
 docker compose run --rm investment-research python tests/test_mock_workflow.py

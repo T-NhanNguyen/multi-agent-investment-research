@@ -13,7 +13,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import internal_configs as cfg
 from llm_client import OpenAIClient
 from agent_engine import Agent, AgentSpecLoader
-from finviz_scraper import FinvizScraper
+from scrapers import FinvizScraper
 from multi_agent_investment import FinvizAdapter
 
 # Configure verbose logging without emojis
