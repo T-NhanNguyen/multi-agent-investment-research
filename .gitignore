@@ -27,7 +27,5 @@ node_modules/
 # Personal & Tests
 .agent/
 examples/
-# tests/
-tests/crawl4ai_output
-tests/crawl4ai_agent.py
-tests/sandbox_crawl4ai.py
+CLAUDE.md
+scrapers/browser_profile/*

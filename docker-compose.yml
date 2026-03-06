@@ -1,6 +1,7 @@
 services:
   investment-research:
     build: .
+    image: investment-research-orchestrator
     container_name: investment_agents
     env_file:
       - .env
@@ -11,8 +12,8 @@ services:
     volumes:
       # Mount whole directory for hot-reload and access to all scripts
       - .:/app
-      # GraphRAG .env mount (needed for Docker CLI to find environment vars)
-      - E:/ai-workspace/projects/graphRAG-LlamaIndex/.env:/app/graphrag.env
+      # GraphRAG .env mount (Bypassed for Mac testing due to E:/ path)
+      # - E:/ai-workspace/projects/graphRAG-LlamaIndex/.env:/app/graphrag.env
       # Docker socket mount for sibling containers
       - /var/run/docker.sock:/var/run/docker.sock
 
@@ -21,7 +22,8 @@ services:
 
   monitoring-api:
     build: .
-    container_name: monitoring_api
+    image: investment-research-api
+    container_name: investment_agents_monitoring_api
     command: python -m uvicorn api_server:app --host 0.0.0.0 --port 8000
     ports:
       - "8001:8000"
@@ -31,7 +33,7 @@ services:
       - .env
     volumes:
       - .:/app
-      - E:/ai-workspace/projects/graphRAG-LlamaIndex/.env:/app/graphrag.env
+      # - E:/ai-workspace/projects/graphRAG-LlamaIndex/.env:/app/graphrag.env
       - /var/run/docker.sock:/var/run/docker.sock
     restart: always
 

@@ -1,3 +1,19 @@
+Playwright setup:
+Playwright requires you to download it outside of the container, and to set the PATH for it, 
+`echo 'export PATH="$PATH:/Users/yourname/Library/Python/3.9/bin"' >> ~/.zshrc
+source ~/.zshrc
+` before you can run the login utility..
+
+1. Download Playwright: `playwright install`
+2. Set PATH: `echo 'export PATH="$PATH:/Users/yourname/Library/Python/3.9/bin"' >> ~/.zshrc
+source ~/.zshrc
+`
+3. download your preferred browser: `playwright install chrome`
+4. run the login utility: `python browser_automation/firefox/login_utility.py`
+5. test the scraper: `docker compose run --rm investment-research \
+  python3 browser_automation/core/runner.py FINVIZ_TICKER ticker=TSLA
+`
+
 # Multi-Agent Investment Research System
 
 A sophisticated coordination system for automated investment research. It leverages a multi-agent, synthesis-driven iterative architecture to provide high-conviction investment theses using stateful LLM agents and the Model Context Protocol (MCP).
